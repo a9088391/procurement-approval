@@ -24,17 +24,19 @@ public sealed class LoginSession
     public DateTimeOffset LastSeenAt { get; set; }
 }
 
-// 組織、Identity 與登入紀錄共用 DbContext，讓設定更新和必要撤銷能在同一交易提交。
+// 組織、Identity、登入紀錄與請購共用 DbContext，讓異動與必要的登入更新能在同一交易提交。
 public sealed class AuthDb(DbContextOptions<AuthDb> options) : IdentityDbContext<AppUser>(options)
 {
     public DbSet<LoginSession> Sessions => Set<LoginSession>();
     public DbSet<Department> Departments => Set<Department>();
+    internal DbSet<Requisition> Requisitions => Set<Requisition>();
+    internal DbSet<RequisitionLine> RequisitionLines => Set<RequisitionLine>();
 
     // 在呼叫端交易內串行組織設定與本機初始化，避免跨帳號或部門的資格檢查互相穿插。
     internal Task LockOrganization(CancellationToken ct) =>
         Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(80101)", ct);
 
-    // 保留 Identity 原有對應，並補上組織和登入的資料庫約束，讓資料庫也能維護一致性。
+    // 保留 Identity 原有對應，並補上組織、登入和請購的資料庫約束。
     protected override void OnModelCreating(ModelBuilder builder)
     {
         // 先建立 Identity 的標準模型，再限制應用程式可保存的帳號類別。
@@ -80,6 +82,9 @@ public sealed class AuthDb(DbContextOptions<AuthDb> options) : IdentityDbContext
             .HasForeignKey(s => s.UserId)
             .OnDelete(DeleteBehavior.Cascade);
         builder.Entity<LoginSession>().HasIndex(s => s.UserId);
+
+        // 將請購對應集中在自己的模組，讓帳號與請購明細的關聯由同一模型管理。
+        Requisition.Configure(builder);
     }
 }
 

@@ -1,14 +1,16 @@
 # 後端與 API 契約
 
-目前提供本機登入、密碼變更、部門及業務帳號管理。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
+目前提供本機登入、密碼變更、部門及業務帳號管理，以及本人請購草稿。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
 
 ## 入口與責任
 
-- `backend/Program.cs`：組態、migration、Cookie／CSRF 與強制改密碼防護，並掛載身分和管理 API。
+- `backend/Program.cs` 負責組態、migration、Cookie／CSRF 與強制改密碼防護，並掛載身分、管理和草稿 API。
 - `backend/AuthEndpoints.cs`：以 `MapGroup("/api/auth")` 定義身分 Minimal API。發出 CSRF 權杖，其餘操作交給 `AuthService`。
 - `backend/AuthModel.cs`：Identity 帳號、伺服器端登入紀錄、EF 對應與明確 DTO。
 - `backend/AuthService.cs`：登入、鎖定、密碼長度、登入期限、撤銷及交易規則。
 - `backend/OrganizationEndpoints.cs`、`OrganizationModel.cs`、`OrganizationService.cs` 負責管理路由、部門與管理 DTO，以及設定資格、驗證、版本和交易。
+- `backend/RequisitionDraftEndpoints.cs` 及 `RequisitionDraftContracts.cs` 定義草稿 Minimal API 及 DTO。
+- `backend/RequisitionDraftService.cs` 集中本人草稿查詢、版本和交易。`RequisitionDraftInput.cs` 驗證內容及計算金額，`Requisition.cs` 定義主檔、明細及 EF 對應。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
@@ -22,13 +24,13 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | --- | --- | --- |
 | `GET /api/auth/csrf` | 無 | `200 {"token":"…"}`，並設定防偽 Cookie |
 | `POST /api/auth/login` | `{"userName":"帳號","password":"使用者輸入"}` | `204`，設定登入 Cookie |
-| `GET /api/auth/me` | 登入 Cookie | `200 {"userName":"…","accountType":"admin 或 business","roles":["…"],"version":"…","mustChangePassword":false}` |
+| `GET /api/auth/me` | 登入 Cookie | `200 {"userName":"…","accountType":"admin 或 business","roles":["…"],"version":"…","mustChangePassword":false}`，附上同次驗證身分的 `X-CSRF-TOKEN` 回應標頭 |
 | `POST /api/auth/change-password` | `{"currentPassword":"使用者輸入","newPassword":"使用者輸入","version":"me 的版本"}` | `204`，撤銷全部登入並清除呼叫者 Cookie |
 | `POST /api/auth/logout` | 無本文 | `204`，僅撤銷這次登入並清除 Cookie |
 
 `roles` 目前使用 `Administrator`、`Applicant`、`Manager`、`Finance`，回應按名稱排序。角色、啟用與強制改密碼狀態從資料庫讀取。Cookie 保存帳號及登入識別。`version` 是不透明值，直接傳回即可。`mustChangePassword` 為 `true` 時，現有登入只允許讀取身分、取得 CSRF 權杖、改密碼與登出。改密碼後須用不同於暫時密碼的新密碼登入。
 
-首次顯示登入表單前取得防偽 token；登入成功後重新取得，再讀 `me`。切換帳號、登出或改密碼後，重新取得 token，避免使用綁定舊身分的 token。改密碼成功會使所有舊登入立即失效，前端應回到登入表單並顯示成功訊息。無權杖或不合法權杖的變更不寫入帳號、密碼、登入或鎖定狀態，也不延長閒置期限。
+匿名登入表單使用 `/api/auth/csrf` 取得的防偽權杖。已登入畫面採用成功 `me` 回應附帶的權杖，使權杖與當次確認的身分成對取得。切換帳號、登出或改密碼後，重新讀取身分與權杖。改密碼成功會使所有舊登入立即失效，前端應回到登入表單並顯示成功訊息。無權杖或不合法權杖的變更不寫入帳號、密碼、登入或鎖定狀態，也不延長閒置期限。
 
 錯誤一律為 `{"code":"穩定識別碼","message":"繁中訊息"}`：
 
@@ -40,12 +42,12 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | 401 | `invalid_credentials` | 登入帳密不正確，或帳號不可使用 |
 | 401 | `unauthenticated` | 回登入表單；不會回傳 HTML 轉址 |
 | 403 | `forbidden` | 使用符合資格的身分，或先變更臨時密碼 |
-| 404 | `not_found` | 重新讀取設定，確認目標存在且可管理 |
-| 409 | `stale_version` | 重新讀取目前身分或設定，避免覆寫新版本 |
+| 404 | `not_found` | 重新讀取設定或本人草稿清單，核對目前可存取的資料 |
+| 409 | `stale_version` | 重新讀取目前身分、設定或草稿，避免覆寫新版本 |
 | 409 | `duplicate_user_name` | 選擇其他帳號名稱 |
 | 423 | `account_locked` | 連續失敗已鎖定，等待解除後由使用者重試 |
 | 429 | `rate_limited` | 同來源登入過密，稍後再由使用者重試 |
-| 500 | `server_error` | 結果未確認；先重新讀取身分或由使用者重新登入確認，不自動重送 |
+| 500 | `server_error` | 結果未確認，先重新讀取相關資料，再由使用者決定是否重送 |
 
 受保護端點先辨識登入；未登入或登入已失效時回 `401 unauthenticated`，不讓舊身分綁定的 token 把撤銷誤報為 CSRF 錯誤。登入仍有效時，缺少或不合法 CSRF 回 `400 invalid_csrf`。匿名登入端點同樣必須通過 CSRF，才能執行帳密檢查與登入寫入。
 
@@ -66,6 +68,24 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 
 部門名稱修剪首尾空白後須為 1–100 個 UTF-16 字元。新帳號名稱同樣修剪首尾空白，須為 1–64 個 UTF-16 字元，重複名稱以不分大小寫判斷。部門名稱、新帳號名稱、臨時密碼及強制改密碼的新密碼都必須能由單行表單輸入，任何位置含 CR 或 LF 均回 `400 invalid_input`。密碼長度 12–128 個 UTF-16 字元，首尾空白會保留。新業務帳號具申請人角色，主管與財務可兼任。重設時需使用不同於現有密碼的臨時密碼。新分配部門須為啟用狀態，原有歸屬可保留。新選的預設審核人須啟用、有對應角色，且申請人和兩位審核人各自不同。停用或撤權保留指向該人選的設定，管理員可查閱並替換。
 
+## 本人草稿 API
+
+限啟用中的業務帳號使用。所有讀寫皆需有效登入，`POST` 另須帶同源防偽權杖。草稿 GET 可只用 Cookie，也可附上 `X-CSRF-TOKEN` 供伺服器確認本次 Cookie 與讀取端身分一致。草稿畫面會附上此標頭，權杖失配回 `400 invalid_csrf`。管理帳號沒有草稿權限，失效登入得到 `401 unauthenticated`。他人草稿和不存在的草稿同樣回 `404 not_found`。
+
+| 端點 | 請求本文 | 成功 |
+| --- | --- | --- |
+| `GET /api/requisitions/drafts` | 無 | `200`，本人草稿摘要，依更新時間新到舊排列，時間相同時依識別排序 |
+| `POST /api/requisitions/drafts` | `subject`、`purpose`、`lines` 可省略或為 `null` | `201`，保存後的草稿 |
+| `GET /api/requisitions/drafts/{id}` | 無 | `200`，目前草稿 |
+| `POST /api/requisitions/drafts/{id}` | `version`、`subject`、`purpose`、`lines`，須明確提供可編輯欄位，可用 `null` 清除 | `200`，保存後的草稿 |
+| `POST /api/requisitions/drafts/{id}/delete` | `version` | `204` |
+
+摘要包含 `id`、`number`、`subject`、`updatedAt`。草稿另回傳 `applicantId`、`status`（`draft`）、`purpose`、`lines`、`estimatedAmount`、`isComplete`、`version` 和 `createdAt`。識別、單號、申請人、時間、狀態、版本及計算金額由伺服器決定。部門與送審時間會由送審操作決定。輸入未宣告的欄位會回 `400 invalid_input`。
+
+每筆明細接受 `itemName`、`unit`、`quantity`、`unitPrice`，可省略或為 `null`。主旨及品名最多 200、用途最多 4,000、單位最多 40 個 UTF-16 字元。主旨、品名及單位是單行欄位，所有文字禁止 NUL。數量為 1–10,000 的 JSON 整數。單價為大於零、至多 1,000,000 的 JSON 十進位數值，最多兩位小數。數值採一般十進位寫法，拒絕引號、指數記法及超精度。每列及整單以精確十進位計算 TWD，已能計算的金額合計不得超過 10,000,000。完全無法計算時回傳 `null`。明細回應另包含該列 `estimatedAmount`。
+
+`isComplete` 表示主旨、用途和 1–100 筆明細的必填內容已填齊。草稿可先保存任一未填齊的內容及可計算小計。讀取時的 `version` 需原樣帶回保存或刪除。過期版本得到 `409 stale_version`，保留目前內容。收到網路錯誤或 `500 server_error` 時，先讀回本人草稿或清單以確認結果，再決定下一步。
+
 ## 安全及一致性
 
 密碼長度為 12–128 個 .NET UTF-16 字元，不修剪密碼；帳號名稱使用 invariant uppercase 比對。Identity 負責具鹽密碼雜湊，資料庫不保存明文密碼。連續錯誤五次鎖定十五分鐘，成功登入清除失敗次數；鎖定到期的當下可以登入。同直連來源每個一分鐘視窗最多三十次登入嘗試，包含不存在帳號；單體程序重啟會重建來源計數，不信任外來 Forwarded 標頭。
@@ -78,6 +98,8 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 組織操作與本機初始化先取得同一 PostgreSQL transaction advisory lock，再鎖定操作者與目標帳號。部門資格、預設人選、版本和角色更新因此依交易順序判定。成功的管理寫入在同一筆交易更新操作者這次登入的活動時間，絕對期限仍以登入建立時間計算。停用帳號或重設密碼會在同一筆交易撤銷所有登入。重新啟用後須重新登入，原 Cookie 已失效。
 
+草稿服務鎖定操作者的帳號列，重查當下的登入與業務資格。同一帳號的草稿版本檢查、寫入和撤權依此列鎖的交易提交順序生效。保存會在同一交易取代有順序的明細、更新主檔與該次登入活動時間。交易內任一步失敗都會回滾。刪除主檔時 PostgreSQL 外鍵會同步刪除該草稿明細。
+
 ## 固定工具鏈與開發
 
 SDK `10.0.403`，ASP.NET Core／Identity／EF `10.0.14`，Npgsql EF provider `10.0.3`，PostgreSQL `18.6`。`global.json` 禁止 SDK roll-forward，NuGet lock files 固定相依；Npgsql 要求 EF `[10.0.4, 11.0.0)`，目前固定版本符合。
@@ -89,3 +111,5 @@ docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests 
 ```
 
 啟動使用 `MigrateAsync` 套用 migration，產生檔由工具管理。`OrganizationManagement` 新增部門與帳號欄位，既有帳號以未分配部門、未設定預設人選、無強制改密碼要求的狀態升級，保留原識別與憑證。降版移除新欄位及部門表會遺失組織設定與強制改密碼狀態，已變更的帳密及角色仍保留。若需回到升級前資料，須使用升級前的資料庫備份與相符的應用版本。
+
+`RequisitionDrafts` 新增 `Requisitions`、`RequisitionLines` 及草稿清單所需索引。既有帳號與設定沿用原有資料。執行此 migration 的降版會移除這兩張表，已保存的草稿需要透過備份才能復原。

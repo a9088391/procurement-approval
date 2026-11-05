@@ -68,13 +68,18 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-width: 0;
   padding: 0.65rem;
   border: 1px solid #7a879b;
   border-radius: 0.25rem;
   font: inherit;
+}
+
+textarea {
+  resize: vertical;
 }
 
 button {
@@ -149,6 +154,24 @@ dd {
 
 .organization form + form {
   margin-top: 1.5rem;
+}
+
+/* 草稿維持單欄，長主旨和單號可換行，操作按鈕於窄畫面自動換列。 */
+.requisition-drafts {
+  overflow-wrap: anywhere;
+}
+
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.75rem;
+}
+
+.draft-line {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #d6dce5;
+  border-radius: 0.25rem;
 }
 
 /* 手機只收緊留白，維持相同表單順序與控制項。 */

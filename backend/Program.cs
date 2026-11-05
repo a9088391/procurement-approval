@@ -42,12 +42,13 @@ builder
     .AddRoles<IdentityRole>()
     .AddEntityFrameworkStores<AuthDb>();
 
-// 時鐘和來源節流全程序共用。登入、管理服務及 Cookie 事件跟隨請求並共用 DbContext。
+// 時鐘和來源節流全程序共用。登入、管理、草稿服務及 Cookie 事件跟隨請求並共用 DbContext。
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<LoginThrottle>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<SessionEvents>();
 builder.Services.AddScoped<OrganizationService>();
+builder.Services.AddScoped<RequisitionDraftService>();
 
 // 讓格式錯誤走共用的 JSON 錯誤處理，而非由路由直接產生空回應。
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
@@ -88,7 +89,7 @@ builder
 builder.Services.AddAntiforgery(options =>
 {
     // 固定標頭名稱並限制防偽 Cookie 的讀取與跨站傳送。
-    options.HeaderName = "X-CSRF-TOKEN";
+    options.HeaderName = AuthEndpoints.CsrfHeaderName;
     options.Cookie.Name = "procurement.csrf";
     options.Cookie.HttpOnly = true;
     options.Cookie.SameSite = SameSiteMode.Strict;
@@ -164,7 +165,9 @@ app.Use(async (http, next) =>
     var api = requestPath.StartsWithSegments("/api");
     var anonymousAuth = login || csrf;
     var protectedAuth = requestPath.StartsWithSegments("/api/auth") && !anonymousAuth;
-    var protectedPath = requestPath.StartsWithSegments("/api/admin") || protectedAuth;
+    var protectedPath = protectedAuth
+        || requestPath.StartsWithSegments("/api/admin")
+        || requestPath.StartsWithSegments("/api/requisitions");
     var post = HttpMethods.IsPost(http.Request.Method);
 
     // 先辨識失效登入，避免舊身分 token 因撤銷時序被誤報為 CSRF 錯誤。
@@ -192,8 +195,13 @@ app.Use(async (http, next) =>
         return;
     }
 
-    // POST 可能異動狀態，先驗證防偽權杖再允許執行。
-    if (api && post)
+    // 草稿 GET 若附上權杖，須與當次 Cookie 身分一致，避免共用 Cookie 的舊頁讀到另一帳號的資料。
+    var draftReadWithToken = HttpMethods.IsGet(http.Request.Method)
+        && requestPath.StartsWithSegments("/api/requisitions/drafts")
+        && http.Request.Headers.ContainsKey(AuthEndpoints.CsrfHeaderName);
+
+    // 所有 API POST 都要求權杖，直接使用 Cookie 的草稿 GET 仍可省略標頭。
+    if ((api && post) || draftReadWithToken)
     {
         try
         {
@@ -233,6 +241,7 @@ app.Use(async (http, next) =>
 // 各模組集中註冊自己的 API，啟動入口只負責掛載。
 app.MapAuthEndpoints();
 app.MapOrganizationEndpoints();
+app.MapRequisitionDraftEndpoints();
 
 // 讓編譯後的前端與 API 使用同一來源，瀏覽器可直接帶上登入 Cookie。
 app.UseDefaultFiles();

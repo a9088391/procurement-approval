@@ -6,7 +6,7 @@
 docker compose -p procurement-approval up --build -d
 ```
 
-入口是 `http://127.0.0.1:5080`，API 與 React 前端同源。資料庫留在 Compose 內部網路。此設定只供本機 HTTP 展示。登入管理帳號即可維護部門及業務帳號，完整操作見 [README](../README.md)。
+入口是 `http://127.0.0.1:5080`，API 與 React 前端同源。資料庫留在 Compose 內部網路。此設定只供本機 HTTP 展示。管理帳號可維護部門及業務帳號，業務帳號可管理本人草稿。完整操作見 [README](../README.md)。
 
 初始化程序建立 `.local/`，目錄權限 `0700`，隨機資料庫密碼及 `initial-accounts.json` 權限 `0600`。在本機編輯器開啟 `.local/initial-accounts.json`，取得 `admin`、`applicant`、`manager`、`finance` 的隨機初始密碼。不要貼到一般紀錄、截圖、聊天或公開文件。`admin` 是管理帳號，其餘是業務帳號；預載業務帳號可直接展示。
 
@@ -28,7 +28,7 @@ docker compose -p procurement-approval stop
 docker compose -p procurement-approval up -d
 ```
 
-帳號、密碼、登入紀錄、部門與預設審核人保存在專案的 `database` named volume，Cookie 防護金鑰保存在 `.local/keys/`。保留兩者，重啟後原設定及有效登入才能繼續使用。`.local/` 含本機敏感資料，已排除於 Git 和 Docker build context。金鑰存取由目錄權限限制。
+帳號、密碼雜湊、登入紀錄、部門、預設審核人與已保存的草稿保存在專案的 `database` named volume，Cookie 防護金鑰保存在 `.local/keys/`。保留兩者，重啟後可繼續使用原設定與有效登入，並重新開啟已保存的草稿。`.local/` 含本機敏感資料，已排除於 Git 和 Docker build context。金鑰存取由目錄權限限制。
 
 `docker compose down` 會移除本專案容器與網路，預設保留資料 volume；不要加 `--volumes`。刪除 volume 會失去帳號與資料，刪除 `.local/keys/` 會使現有 Cookie 無法解密。這些刪除不是復原方式；目前沒有備份／復原工具，資料遺失無法靠退回程式修復。
 

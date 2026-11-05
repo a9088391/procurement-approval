@@ -4,6 +4,8 @@ namespace Procurement;
 
 internal static class AuthEndpoints
 {
+    internal const string CsrfHeaderName = "X-CSRF-TOKEN";
+
     // 集中註冊身分 API，讓啟動入口只需掛載一次，並由 AuthService 處理登入與交易規則。
     public static void MapAuthEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -21,9 +23,18 @@ internal static class AuthEndpoints
             (LoginRequest request, HttpContext http, AuthService auth, CancellationToken ct) =>
                 auth.Login(request, http, ct));
 
-        // 查詢目前身分，沿用 AuthService 從資料庫取得的授權資訊。
-        group.MapGet("/me", (HttpContext http, AuthService auth, CancellationToken ct) =>
-            auth.Me(http.User, ct));
+        // 將目前身分與同一請求的防偽權杖一起回傳，避免前端合併到不同登入的結果。
+        group.MapGet("/me", async (HttpContext http, AuthService auth, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            // 先由服務重查目前登入，只有成功取得身分才能從此請求產生權杖。
+            var result = await auth.Me(http.User, ct);
+            if (result is IStatusCodeHttpResult { StatusCode: StatusCodes.Status200OK })
+            {
+                http.Response.Headers[CsrfHeaderName] = antiforgery.GetAndStoreTokens(http).RequestToken
+                    ?? throw new InvalidOperationException();
+            }
+            return result;
+        });
 
         // 將密碼變更交給 AuthService，讓雜湊更新和撤銷維持同一交易。
         group.MapPost(

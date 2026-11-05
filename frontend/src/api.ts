@@ -77,6 +77,40 @@ export type OrganizationWrite =
       body: Pick<PasswordRequestDto, "newPassword" | "version">;
     };
 
+// 清單只回傳辨識草稿所需的摘要，開啟單筆時才取得內容和版本。
+export interface DraftSummaryDto {
+  id: string;
+  number: string;
+  subject: string | null;
+  updatedAt: string;
+}
+
+interface DraftLineInputDto {
+  itemName: string | null;
+  unit: string | null;
+  quantity: number | null;
+  unitPrice: number | null;
+}
+
+// 寫入只接受可編輯欄位；空值允許逐步填寫，也能明確清除既有欄位。
+export interface DraftInputDto {
+  subject: string | null;
+  purpose: string | null;
+  lines: DraftLineInputDto[];
+}
+
+// 詳情與保存回應的金額、完整性和版本都由後端決定。
+export interface DraftDto extends DraftSummaryDto {
+  applicantId: string;
+  status: "draft";
+  purpose: string | null;
+  lines: (DraftLineInputDto & { estimatedAmount: number | null })[];
+  estimatedAmount: number | null;
+  isComplete: boolean;
+  version: string;
+  createdAt: string;
+}
+
 // 防偽端點回應只供本次頁面的後續寫入使用。
 interface CsrfResponseDto {
   token: string;
@@ -127,19 +161,25 @@ export async function readSession(signal?: AbortSignal) {
   const csrf: CsrfResponseDto = await (
     await request("auth/csrf", { signal })
   ).json();
+  let token = csrf.token;
   let identity: IdentityDto | null;
 
   // 只有明確的未登入回應可作為匿名；其他錯誤交由畫面進入恢復。
   try {
-    identity = await (await request("auth/me", { signal })).json();
+    // 已登入身分只配對同一回應的權杖，避免共用 Cookie 切換時混合不同帳號。
+    const response = await request("auth/me", { signal });
+    const identityToken = response.headers.get("X-CSRF-TOKEN");
+    if (!identityToken) throw new Error("身分回應缺少防偽權杖。");
+    identity = await response.json();
+    token = identityToken;
   } catch (error) {
     if (!(error instanceof ApiError) || error.code !== "unauthenticated")
       throw error;
     identity = null;
   }
 
-  // 兩個讀取都得到可判斷的結果後，再一起交給畫面更新。
-  return { token: csrf.token, identity };
+  // 已登入權杖與身分同源；只有明確匿名時才沿用最初取得的登入權杖。
+  return { token, identity };
 }
 
 // 共用登入、改密碼及登出的 POST 邊界，讓每次變更都帶同源防偽權杖。
@@ -167,6 +207,60 @@ export async function writeOrganization(
   // 只將契約定義的 204 視為寫入確認，其他成功狀態也需要人工讀回。
   const response = await post(`admin/${operation.path}`, token, operation.body);
   if (response.status !== 204) throw new Error("無法確認組織寫入回應。");
+}
+
+const draftPath = "requisitions/drafts";
+
+// 清單 GET 附上畫面身分的權杖，避免共用 Cookie 切換帳號後採用另一人的資料。
+export async function readDraftList(
+  token: string,
+  signal?: AbortSignal,
+): Promise<DraftSummaryDto[]> {
+  return (
+    await request(draftPath, { signal, headers: { "X-CSRF-TOKEN": token } })
+  ).json();
+}
+
+// 開啟或核對草稿時，以同一個畫面身分的權杖讀取當下詳情及版本。
+export async function readDraft(token: string, id: string): Promise<DraftDto> {
+  return (
+    await request(`${draftPath}/${encodeURIComponent(id)}`, {
+      headers: { "X-CSRF-TOKEN": token },
+    })
+  ).json();
+}
+
+// 建立不帶版本，更新只附上讀取時的版本，兩者均使用同一防偽邊界。
+export async function saveDraft(
+  token: string,
+  content: DraftInputDto,
+  current?: Pick<DraftDto, "id" | "version">,
+): Promise<DraftDto> {
+  // 依是否已有系統識別選擇入口，且只送出一次。
+  const response = current
+    ? await post(`${draftPath}/${encodeURIComponent(current.id)}`, token, {
+        ...content,
+        version: current.version,
+      })
+    : await post(draftPath, token, content);
+
+  // 必須收到對應的成功狀態及完整回應，才能把保存視為已確認。
+  if (response.status !== (current ? 200 : 201))
+    throw new Error("無法確認草稿保存回應。");
+  return response.json();
+}
+
+// 刪除提交讀取時的版本；僅契約定義的 204 代表已確認刪除。
+export async function deleteDraft(
+  token: string,
+  { id, version }: Pick<DraftDto, "id" | "version">,
+) {
+  const response = await post(
+    `${draftPath}/${encodeURIComponent(id)}/delete`,
+    token,
+    { version },
+  );
+  if (response.status !== 204) throw new Error("無法確認草稿刪除回應。");
 }
 
 // 所有 POST 共用防偽標頭與逾時設定，不自動重試可能已生效的操作。

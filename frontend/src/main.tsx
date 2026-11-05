@@ -9,6 +9,7 @@ import {
 import { createRoot } from "react-dom/client";
 import { ApiError, readSession, writeAuth, type IdentityDto } from "./api";
 import { Organization } from "./Organization";
+import { RequisitionDrafts } from "./RequisitionDrafts";
 import "./style.css";
 
 type Operation = "login" | "change-password" | "logout";
@@ -39,16 +40,22 @@ function App() {
   const [unknownOrganizationFor, setUnknownOrganizationFor] = useState<
     string | null
   >(null);
+  const [unknownDraftFor, setUnknownDraftFor] = useState<string | null>(null);
 
   // token 只留在記憶體，不寫入網址或瀏覽器儲存空間。
   const token = useRef("");
   // ref 同步阻擋同一輪事件重複進入，pending 則負責停用畫面操作。
   const busy = useRef(false);
   const recovery = useRef<HTMLElement>(null);
-  // 只標記組織觸發的身分恢復；已確認保存的事實獨立於失效指引。
-  const organizationRecovery = useRef<{ confirmedWrite?: string } | null>(null);
+  const draftLeave = useRef({ warn: false, unknown: false });
+  // 受保護畫面要求確認身分時，已確認保存的事實獨立於失效指引。
+  const protectedRecovery = useRef<{ confirmedWrite?: string } | null>(null);
+  const actorName = identity?.userName;
 
-  // 身分與組織操作共用閘門，讓重新登入不會與前一個管理操作的讀回交錯。
+  // 草稿送出請求時讀取記憶體權杖，固定回呼讓一般畫面更新不會重啟清單讀取。
+  const getDraftToken = useCallback(() => token.current, []);
+
+  // 身分與受保護畫面共用閘門，避免登入切換與舊資料讀回交錯。
   const beginOperation = useCallback(() => {
     // 同步標記所有權，讓畫面更新前抵達的第二個事件也無法提交。
     if (busy.current) return false;
@@ -63,11 +70,11 @@ function App() {
     setPending(false);
   }, []);
 
-  // 管理端點拒絕身分或防偽時，先移除組織資料，再由使用者重新確認。
-  const recoverOrganizationSession = useCallback(
+  // 受保護端點拒絕身分或防偽時，先移除資料，再由使用者重新確認。
+  const recoverProtectedSession = useCallback(
     (notice: string, confirmedWrite?: string) => {
       // 舊權杖及表單一起清除，保存確認與恢復指引分開供重讀使用。
-      organizationRecovery.current = { confirmedWrite };
+      protectedRecovery.current = { confirmedWrite };
       token.current = "";
       setIdentity(null);
       setMessage(notice);
@@ -76,6 +83,35 @@ function App() {
     },
     [],
   );
+
+  // 身分失效時只保留未決操作的帳號標記；舊草稿和內容一併卸載。
+  const recoverDraftSession = useCallback(
+    (notice: string, unknownResult: boolean) => {
+      if (unknownResult && actorName) setUnknownDraftFor(actorName);
+      recoverProtectedSession(notice);
+    },
+    [actorName, recoverProtectedSession],
+  );
+
+  // 編輯器卸載時也會清除提示條件，避免下一個帳號沿用保護狀態。
+  const setDraftLeaveWarning = useCallback((warn: boolean, unknown = false) => {
+    draftLeave.current = { warn, unknown };
+  }, []);
+
+  // 只有會主動關閉編輯器的身分操作需要詢問，取消時保留目前草稿。
+  function canLeaveDraft() {
+    return (
+      !draftLeave.current.warn ||
+      window.confirm(
+        "繼續會關閉草稿編輯畫面，尚未保存的修改會遺失。確定要繼續嗎？",
+      )
+    );
+  }
+
+  // 身分流程確定要卸載編輯器時，只留下同帳號可見的未知結果標記。
+  function rememberUnknownDraft() {
+    if (draftLeave.current.unknown && actorName) setUnknownDraftFor(actorName);
+  }
 
   // 舊表單被移除時，把鍵盤焦點帶到恢復區，下一次 Tab 可到重讀按鈕。
   useEffect(() => {
@@ -125,26 +161,33 @@ function App() {
 
   // 手動恢復只讀取 token 與身分，不重送 POST，也不推定先前寫入的成敗。
   async function refresh() {
-    // 與 POST 共用同步閘門，重讀期間先隱藏原身分和敏感表單。
+    // 取得離開確認並共用同步閘門，重讀期間先隱藏原身分和敏感表單。
+    if (busy.current || !canLeaveDraft()) return;
     if (!beginOperation()) return;
+    rememberUnknownDraft();
     setPhase("loading");
     setIdentity(null);
 
     // 讀取成功後才顯示對應表單；先前不確定的寫入提示仍由原狀態保留。
     try {
       const session = await readSession();
-      // 組織引發的身分恢復已完成，撤下舊指引但保留已收到的保存確認。
-      if (organizationRecovery.current) {
-        const { confirmedWrite } = organizationRecovery.current;
-        organizationRecovery.current = null;
+      // 身分恢復已完成，撤下舊指引但保留已收到的保存確認。
+      if (protectedRecovery.current) {
+        const { confirmedWrite } = protectedRecovery.current;
+        protectedRecovery.current = null;
         setMessage(confirmedWrite ? `${confirmedWrite}。` : "");
         setIsError(false);
       }
 
-      // 手動讀回若確認已換人，清除前一位管理員的未決提示。
+      // 手動讀回若確認已換人，清除前一個帳號的未決提示。
       if (session.identity) {
         setUnknownOrganizationFor(
           // 相同帳號仍需要核對先前未確認的操作。
+          (current) =>
+            current === session.identity?.userName ? current : null,
+        );
+        setUnknownDraftFor(
+          // 草稿未決提示也只供發出原操作的業務帳號核對。
           (current) =>
             current === session.identity?.userName ? current : null,
         );
@@ -171,8 +214,9 @@ function App() {
     operation: Operation,
     event?: FormEvent<HTMLFormElement>,
   ) {
-    // 接管表單提交並阻擋同一輪重複事件，讓每次操作只送出一次。
+    // 接管提交並保護草稿編輯；共用閘門讓每次操作只送出一次。
     event?.preventDefault();
+    if (busy.current || !canLeaveDraft()) return;
     if (!beginOperation()) return;
 
     // 在第一個 await 前擷取本次輸入；後續卸載表單不影響已送出的內容。
@@ -215,9 +259,14 @@ function App() {
       // 記下寫入已成功，讓後續讀取失敗仍可顯示正確的操作結果。
       accepted = true;
 
-      // 成功登入或改密碼會解除身分操作的未知提示；登出清除原管理員的未決提示。
-      if (operation !== "logout") setUnknownResult(false);
-      else setUnknownOrganizationFor(null);
+      // 成功登入或改密碼解除身分操作的未知提示；登出清除原帳號的未決提示。
+      if (operation !== "logout") {
+        setUnknownResult(false);
+        rememberUnknownDraft();
+      } else {
+        setUnknownOrganizationFor(null);
+        setUnknownDraftFor(null);
+      }
 
       // 先卸載舊表單並記下此操作的成功提示，再查證切換後的身分。
       setIdentity(null);
@@ -232,10 +281,15 @@ function App() {
 
       // 重新取得權杖與身分，讓下一個表單對應寫入後的 Cookie 狀態。
       const session = await readSession();
-      // 確認換人後清除前一位管理員的未決提示，避免跨身分出現。
+      // 確認換人後清除前一個帳號的未決提示，避免跨身分出現。
       if (session.identity) {
         setUnknownOrganizationFor(
           // 相同帳號重新登入仍可核對原操作；不同帳號不沿用提示。
+          (current) =>
+            current === session.identity?.userName ? current : null,
+        );
+        setUnknownDraftFor(
+          // 相同業務帳號重新登入可核對先前操作，其他帳號不沿用提示。
           (current) =>
             current === session.identity?.userName ? current : null,
         );
@@ -254,6 +308,7 @@ function App() {
         setPhase("recovery");
       } else if (!(error instanceof ApiError) || error.status >= 500) {
         // 未能確認寫入結果時先卸載表單，保留警示並等待使用者重讀。
+        rememberUnknownDraft();
         setIdentity(null);
         setPhase("recovery");
         setUnknownResult(true);
@@ -266,6 +321,7 @@ function App() {
           )
         ) {
           // 舊身分、權杖或版本已無法使用，清除表單並提示恢復後再操作。
+          rememberUnknownDraft();
           setIdentity(null);
           setPhase("recovery");
           setMessage(`${error.message} 請重新確認身分後，由您再次操作。`);
@@ -294,7 +350,7 @@ function App() {
       <header>
         <p className="eyebrow">本機展示</p>
         <h1>請購簽核</h1>
-        <p>登入與身分管理</p>
+        <p>登入、請購草稿與組織管理</p>
       </header>
       {message || unknownResult ? (
         // 合併一般與未知結果提示；未知結果即使沒有新錯誤仍須以警示呈現。
@@ -445,11 +501,29 @@ function App() {
               pending={pending}
               beginOperation={beginOperation}
               finishOperation={finishOperation}
-              onSessionInvalid={recoverOrganizationSession}
+              onSessionInvalid={recoverProtectedSession}
               unknownResult={unknownOrganizationFor === identity.userName}
               onUnknownResult={
                 // 未決結果只對發出該操作的管理帳號顯示。
                 () => setUnknownOrganizationFor(identity.userName)
+              }
+            />
+          ) : null}
+          {identity.accountType === "business" &&
+          !identity.mustChangePassword ? (
+            // 主管及財務也是業務帳號；此處只掛載本人草稿，不按附加角色分流。
+            <RequisitionDrafts
+              key={identity.userName}
+              getToken={getDraftToken}
+              pending={pending}
+              beginOperation={beginOperation}
+              finishOperation={finishOperation}
+              onSessionInvalid={recoverDraftSession}
+              onLeaveWarningChange={setDraftLeaveWarning}
+              priorUnknown={unknownDraftFor === identity.userName}
+              onUnknownReviewed={
+                // 使用者已核對，目前帳號不再需要保留提示。
+                () => setUnknownDraftFor(null)
               }
             />
           ) : null}
