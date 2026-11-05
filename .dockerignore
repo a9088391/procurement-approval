@@ -1,0 +1,13 @@
+.scratch
+.local
+.git
+AGENTS.md
+docs/agents
+**/bin
+**/obj
+**/TestResults
+frontend/node_modules
+frontend/dist
+.local-browser
+frontend/test-results
+frontend/playwright-report

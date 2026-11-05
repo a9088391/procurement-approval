@@ -1,0 +1,45 @@
+# 只供隔離瀏覽器驗證；不掛展示憑證，不使用展示 DB volume。
+services:
+  local-init:
+    image: procurement-approval:browser
+    volumes: !override
+      - ./.local-browser:/local
+
+  db:
+    volumes: !override
+      - database:/var/lib/postgresql
+      - ./.local-browser:/local:ro
+
+  app:
+    image: procurement-approval:browser
+    networks:
+      default:
+        # 容器內瀏覽器使用固定別名；測試 guard 會拒絕其他來源。
+        aliases: [procurement-web.test]
+    ports: !override
+      - "127.0.0.1:5081:8080"
+    volumes: !override
+      - ./.local-browser:/local
+
+  frontend-tools:
+    image: node:24.22.2
+    profiles: [tools]
+    working_dir: /src/frontend
+    volumes:
+      - ./frontend:/src/frontend
+    command: [npm, run, build]
+
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.64.1-noble
+    profiles: [tools]
+    working_dir: /src/frontend
+    environment:
+      BASE_URL: http://procurement-web.test:8080
+      TEST_TARGET: procurement-approval-browser
+    volumes:
+      - ./frontend:/src/frontend
+      - ./.local-browser:/local:ro
+      - ./.scratch/procurement-approval/frontend-evidence:/evidence
+    depends_on:
+      - app
+    command: [npm, run, test:e2e]

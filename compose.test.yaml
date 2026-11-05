@@ -1,0 +1,34 @@
+# 測試資料與展示環境完全隔離；僅在內部網路連接 PostgreSQL。
+services:
+  db:
+    image: postgres:18.6
+    environment:
+      POSTGRES_DB: procurement_test
+      POSTGRES_USER: procurement_test
+      # trust 僅限這個未發布連接埠的拋棄式測試庫，不套用至展示設定。
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U procurement_test -d procurement_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql
+
+  tests:
+    image: mcr.microsoft.com/dotnet/sdk:10.0.403
+    working_dir: /src
+    volumes:
+      - .:/src
+      - test-nuget:/root/.nuget/packages
+    environment:
+      ConnectionStrings__Database: Host=db;Database=procurement_test;Username=procurement_test
+      DOTNET_NOLOGO: "1"
+      LocalDirectory: /tmp/procurement-tests
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["dotnet", "test", "tests/Procurement.IntegrationTests.csproj", "--logger", "console;verbosity=normal"]
+
+volumes:
+  test-nuget:

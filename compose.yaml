@@ -1,0 +1,47 @@
+# 僅本機 HTTP 展示；密碼由初始化程序寫到忽略且受保護的 .local。
+name: procurement-approval
+
+services:
+  # 先準備受保護密碼檔，資料庫再透過唯讀掛載取得密碼。
+  local-init:
+    image: procurement-approval:local
+    build: .
+    command: ["prepare-local"]
+    volumes:
+      - ./.local:/local
+
+  db:
+    image: postgres:18.6
+    environment:
+      POSTGRES_DB: procurement
+      POSTGRES_USER: procurement
+      POSTGRES_PASSWORD_FILE: /local/database-password
+    volumes:
+      - database:/var/lib/postgresql
+      - ./.local:/local:ro
+    depends_on:
+      local-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U procurement -d procurement"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # 只有網站發布本機連接埠，資料庫留在 Compose 內部網路。
+  app:
+    image: procurement-approval:local
+    build: .
+    environment:
+      InitializeDemo: "true"
+    ports:
+      - "127.0.0.1:5080:8080"
+    volumes:
+      - ./.local:/local
+    depends_on:
+      db:
+        condition: service_healthy
+
+# 與憑證／金鑰目錄分開保存資料，重建容器不會重設帳號。
+volumes:
+  database:

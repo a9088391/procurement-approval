@@ -1,0 +1,13 @@
+# AI 工作流設定與內部產物僅保留本機。
+AGENTS.md
+/docs/agents/
+/.scratch/
+/.local/
+**/bin/
+**/obj/
+**/TestResults/
+/frontend/node_modules/
+/frontend/dist/
+/.local-browser/
+/frontend/test-results/
+/frontend/playwright-report/

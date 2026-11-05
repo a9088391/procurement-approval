@@ -1,0 +1,141 @@
+/* 簡單單欄讓表單在手機可讀，保留鍵盤焦點與長帳號換行。 */
+:root {
+  font-family: system-ui, sans-serif;
+  color: #17243a;
+  background: #f5f7fa;
+  line-height: 1.6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+/* 頁面寬度與間距集中於外層，維持單欄閱讀順序。 */
+main {
+  max-width: 40rem;
+  margin: 3rem auto;
+  padding: 0 1.25rem 2rem;
+}
+
+header {
+  margin-bottom: 1.5rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.25rem;
+}
+
+p {
+  margin: 0.6rem 0;
+}
+
+.eyebrow,
+.hint {
+  color: #526075;
+  font-size: 0.9rem;
+}
+
+section {
+  background: white;
+  border: 1px solid #d6dce5;
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  padding: 1.5rem;
+}
+
+/* min-width 允許表單在窄螢幕縮小，不讓輸入框撐出容器。 */
+fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-top: 1rem;
+}
+
+input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid #7a879b;
+  border-radius: 0.25rem;
+  font: inherit;
+}
+
+button {
+  font: inherit;
+  padding: 0.6rem 1rem;
+  background: #244c82;
+  color: white;
+  border: 1px solid #244c82;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  margin-top: 1rem;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* 鍵盤導覽保留清楚焦點，不只依賴滑鼠或顏色辨識操作位置。 */
+:focus-visible {
+  outline: 3px solid #b35800;
+  outline-offset: 3px;
+}
+
+.secondary {
+  background: white;
+  color: #244c82;
+}
+
+/* 錯誤與長帳號可斷行，避免敏感操作的提示或控制項被水平裁切。 */
+.feedback {
+  padding: 1rem;
+  background: #e8f4ed;
+  border-left: 4px solid #287747;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  background: #fff1ed;
+  border-color: #b33b25;
+}
+
+dl {
+  margin: 0;
+}
+
+dt {
+  color: #526075;
+}
+
+dd {
+  margin: 0 0 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* 手機只收緊留白，維持相同表單順序與控制項。 */
+@media (max-width: 480px) {
+  main {
+    margin-top: 1.5rem;
+  }
+
+  section {
+    padding: 1rem;
+  }
+}
