@@ -67,7 +67,8 @@ label {
   margin-top: 1rem;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-width: 0;
   padding: 0.65rem;
@@ -127,6 +128,27 @@ dt {
 dd {
   margin: 0 0 0.75rem;
   overflow-wrap: anywhere;
+}
+
+/* 管理摘要讓長名稱換行，原生選單則維持在窄螢幕的表單寬度內。 */
+.organization {
+  margin-top: 2rem;
+  overflow-wrap: anywhere;
+}
+
+.organization h3 {
+  margin-top: 0;
+}
+
+.organization select {
+  max-width: 100%;
+  background: white;
+  color: inherit;
+  text-overflow: ellipsis;
+}
+
+.organization form + form {
+  margin-top: 1.5rem;
 }
 
 /* 手機只收緊留白，維持相同表單順序與控制項。 */

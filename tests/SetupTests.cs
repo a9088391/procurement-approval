@@ -93,7 +93,9 @@ public sealed class SetupTests
                     (await login.PostAsJsonAsync(
                         "/api/auth/login",
                         new LoginRequest(pair.Key, pair.Value))).StatusCode);
-                Assert.Equal(pair.Key == "admin" ? "admin" : "business", (await Harness.Me(login)).AccountType);
+                var identity = await Harness.Me(login);
+                Assert.Equal(pair.Key == "admin" ? "admin" : "business", identity.AccountType);
+                Assert.False(identity.MustChangePassword);
             }
         }
         finally

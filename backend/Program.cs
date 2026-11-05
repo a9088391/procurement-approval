@@ -42,11 +42,12 @@ builder
     .AddRoles<IdentityRole>()
     .AddEntityFrameworkStores<AuthDb>();
 
-// 時鐘和來源節流全程序共用。登入服務及 Cookie 事件跟隨請求，才能使用同一個 DbContext。
+// 時鐘和來源節流全程序共用。登入、管理服務及 Cookie 事件跟隨請求並共用 DbContext。
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<LoginThrottle>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<SessionEvents>();
+builder.Services.AddScoped<OrganizationService>();
 
 // 讓格式錯誤走共用的 JSON 錯誤處理，而非由路由直接產生空回應。
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
@@ -146,7 +147,7 @@ app.Use(async (http, next) =>
     }
 });
 
-// 順序不可交換：先驗證 Cookie，再判斷失效登入、CSRF，最後才計入登入來源節流。
+// 順序不可交換：先驗證 Cookie，再檢查登入資格及 CSRF，最後才計入登入來源節流。
 app.UseAuthentication();
 
 // 在同一處處理驗證後的請求防護，讓端點只接收通過檢查的呼叫。
@@ -156,21 +157,18 @@ app.Use(async (http, next) =>
     http.Response.Headers.CacheControl = "no-store";
 
     // 路由忽略大小寫與尾斜線；安全判斷必須採同樣語意，避免端點別名繞過節流。
-    var path = http
-        .Request
-        .Path
-        .Value
-        ?.TrimEnd('/');
+    var requestPath = http.Request.Path;
+    var path = requestPath.Value?.TrimEnd('/');
     var login = string.Equals(path, "/api/auth/login", StringComparison.OrdinalIgnoreCase);
     var csrf = string.Equals(path, "/api/auth/csrf", StringComparison.OrdinalIgnoreCase);
+    var api = requestPath.StartsWithSegments("/api");
+    var anonymousAuth = login || csrf;
+    var protectedAuth = requestPath.StartsWithSegments("/api/auth") && !anonymousAuth;
+    var protectedPath = requestPath.StartsWithSegments("/api/admin") || protectedAuth;
+    var post = HttpMethods.IsPost(http.Request.Method);
 
     // 先辨識失效登入，避免舊身分 token 因撤銷時序被誤報為 CSRF 錯誤。
-    if (http
-            .Request
-            .Path
-            .StartsWithSegments("/api/auth")
-        && !login
-        && !csrf
+    if (protectedPath
         && http
             .User
             .Identity
@@ -180,12 +178,22 @@ app.Use(async (http, next) =>
         return;
     }
 
+    // 強制改密碼期間只允許四項身分操作；新掛載的 API 預設也受此限制。
+    var readRecovery = csrf || string.Equals(path, "/api/auth/me", StringComparison.OrdinalIgnoreCase);
+    var writeRecovery = string.Equals(path, "/api/auth/change-password", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(path, "/api/auth/logout", StringComparison.OrdinalIgnoreCase);
+    var passwordRecovery = (HttpMethods.IsGet(http.Request.Method) && readRecovery)
+        || (post && writeRecovery);
+    if (api
+        && !passwordRecovery
+        && http.Items.ContainsKey(SessionEvents.PasswordChangeRequired))
+    {
+        await AuthService.Error(403, "forbidden", "請先變更臨時密碼。").ExecuteAsync(http);
+        return;
+    }
+
     // POST 可能異動狀態，先驗證防偽權杖再允許執行。
-    if (http
-            .Request
-            .Path
-            .StartsWithSegments("/api")
-        && HttpMethods.IsPost(http.Request.Method))
+    if (api && post)
     {
         try
         {
@@ -205,7 +213,7 @@ app.Use(async (http, next) =>
 
     // 防偽驗證通過後才計入登入額度，從直連 IP 取來源以免信任外部標頭。
     if (login
-        && HttpMethods.IsPost(http.Request.Method)
+        && post
         && !http
             .RequestServices
             .GetRequiredService<LoginThrottle>()
@@ -222,8 +230,9 @@ app.Use(async (http, next) =>
     await next(http);
 });
 
-// 掛載身分 API，讓路由前綴與處理函式集中在 AuthEndpoints。
+// 各模組集中註冊自己的 API，啟動入口只負責掛載。
 app.MapAuthEndpoints();
+app.MapOrganizationEndpoints();
 
 // 讓編譯後的前端與 API 使用同一來源，瀏覽器可直接帶上登入 Cookie。
 app.UseDefaultFiles();

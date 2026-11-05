@@ -100,8 +100,8 @@ public sealed class Harness : WebApplicationFactory<Program>
         });
     }
 
-    // 建立測試帳號及正式格式的雜湊，讓案例可直接從公開登入端點開始驗證。
-    public async Task Seed()
+    // 建立測試身分及正式格式的雜湊，可獨立安排類別和角色以驗證管理授權。
+    public async Task Seed(string accountType = "business", string? roleName = null)
     {
         // 在獨立的資料庫 scope 建立隨機帳號，避免不同案例共用身分。
         using var scope = Services.CreateScope();
@@ -110,6 +110,7 @@ public sealed class Harness : WebApplicationFactory<Program>
         {
             UserName = UserName,
             NormalizedUserName = UserName.ToUpperInvariant(),
+            AccountType = accountType,
             SecurityStamp = Guid.NewGuid().ToString()
         };
 
@@ -119,6 +120,20 @@ public sealed class Harness : WebApplicationFactory<Program>
             .GetRequiredService<IPasswordHasher<AppUser>>()
             .HashPassword(user, Password);
         db.Users.Add(user);
+
+        // 只有指定角色的案例才建立對應，並沿用測試庫已有的 Identity 角色。
+        if (roleName is not null)
+        {
+            var role = await db.Roles.SingleOrDefaultAsync(r => r.Name == roleName);
+            if (role is null)
+            {
+                role = new IdentityRole(roleName) { NormalizedName = roleName.ToUpperInvariant() };
+                db.Roles.Add(role);
+            }
+            db.UserRoles.Add(new IdentityUserRole<string> { UserId = user.Id, RoleId = role.Id });
+        }
+
+        // 帳號和角色同時保存，讓後續請求可以直接登入驗證。
         await db.SaveChangesAsync();
         UserId = user.Id;
     }
@@ -142,21 +157,26 @@ public sealed class Harness : WebApplicationFactory<Program>
     }
 
     // 以測試帳號送出真實登入，可替換密碼以驗證失敗路徑與鎖定規則。
-    public async Task<HttpResponseMessage> Login(HttpClient client, string? password = null)
+    public Task<HttpResponseMessage> Login(HttpClient client, string? password = null) =>
+        Login(client, UserName, password ?? Password);
+
+    // 走正式登入端點，也可使用管理 API 剛新增的帳號驗證完整流程。
+    public static async Task<HttpResponseMessage> Login(HttpClient client, string userName, string password)
     {
         // 先取得防偽權杖，讓登入測到帳密規則並通過正式防偽檢查。
         await Token(client);
 
-        // 未指定密碼時使用測試帳號的原憑證，保留呼叫者覆寫的能力。
-        return await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(UserName, password ?? Password));
+        // 由呼叫端提供確切憑證，保留密碼的首尾空白。
+        return await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(userName, password));
     }
 
     // 回傳已登入且可異動的 client，避免案例沿用匿名權杖而提前被 CSRF 拒絕。
-    public async Task<HttpClient> SignedIn()
+    public async Task<HttpClient> SignedIn(string? userName = null, string? password = null)
     {
         // 先確認登入成功，讓後續失敗能歸因於案例要驗證的條件。
         var client = Client();
-        Assert.Equal(HttpStatusCode.NoContent, (await Login(client)).StatusCode);
+        using var response = await Login(client, userName ?? UserName, password ?? Password);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
 
         // 重新取得已登入身分的權杖，完成異動請求的準備。
         await Token(client);

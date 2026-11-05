@@ -6,6 +6,7 @@ export interface IdentityDto {
   accountType: "admin" | "business";
   roles: string[];
   version: string;
+  mustChangePassword: boolean;
 }
 
 // 登入僅提交帳密；角色與資格由後端判斷。
@@ -20,6 +21,61 @@ export interface PasswordRequestDto {
   newPassword: string;
   version: string;
 }
+
+// 管理讀取保留停用的部門及版本，供畫面確認既有歸屬與保存時比對。
+export interface DepartmentDto {
+  id: string;
+  name: string;
+  active: boolean;
+  version: string;
+}
+
+// 帳號設定僅包含可管理欄位，null 表示未分配或未設定。
+interface AccountSettingsDto {
+  active: boolean;
+  version: string;
+  departmentId: string | null;
+  isManager: boolean;
+  isFinance: boolean;
+  managerReviewerId: string | null;
+  financeReviewerId: string | null;
+}
+
+// 業務帳號讀取多帶識別、名稱與改密碼狀態，完全不含憑證。
+export interface BusinessAccountDto extends AccountSettingsDto {
+  id: string;
+  userName: string;
+  mustChangePassword: boolean;
+}
+
+// 部門及帳號一起讀取，讓選項和版本採用同一份設定。
+export interface OrganizationDto {
+  departments: DepartmentDto[];
+  accounts: BusinessAccountDto[];
+}
+
+// 各路徑攜帶明確的寫入欄位，不把讀取資料或密碼帶到其他操作。
+export type OrganizationWrite =
+  | { path: "departments"; body: { name: string } }
+  | {
+      path: `departments/${string}`;
+      body: Pick<DepartmentDto, "name" | "active" | "version">;
+    }
+  | {
+      path: "accounts";
+      body: {
+        userName: string;
+        password: string;
+        departmentId: string;
+        isManager: boolean;
+        isFinance: boolean;
+      };
+    }
+  | { path: `accounts/${string}`; body: AccountSettingsDto }
+  | {
+      path: `accounts/${string}/reset-password`;
+      body: Pick<PasswordRequestDto, "newPassword" | "version">;
+    };
 
 // 防偽端點回應只供本次頁面的後續寫入使用。
 interface CsrfResponseDto {
@@ -48,7 +104,7 @@ export class ApiError extends Error {
 // 共用同源及逾時設定；呼叫端提供 signal 時，由呼叫端管理取消期限。
 async function request(path: string, options?: RequestInit): Promise<Response> {
   // 同源請求帶上 Cookie；停用快取以讀取目前的身分與權杖。
-  const response = await fetch(`/api/auth/${path}`, {
+  const response = await fetch(`/api/${path}`, {
     ...options,
     credentials: "same-origin",
     cache: "no-store",
@@ -69,13 +125,13 @@ async function request(path: string, options?: RequestInit): Promise<Response> {
 export async function readSession(signal?: AbortSignal) {
   // 先取得防偽權杖，即使身分查詢確認為匿名，後續登入仍能提交。
   const csrf: CsrfResponseDto = await (
-    await request("csrf", { signal })
+    await request("auth/csrf", { signal })
   ).json();
   let identity: IdentityDto | null;
 
   // 只有明確的未登入回應可作為匿名；其他錯誤交由畫面進入恢復。
   try {
-    identity = await (await request("me", { signal })).json();
+    identity = await (await request("auth/me", { signal })).json();
   } catch (error) {
     if (!(error instanceof ApiError) || error.code !== "unauthenticated")
       throw error;
@@ -93,7 +149,29 @@ export async function writeAuth(
   body?: LoginRequestDto | PasswordRequestDto,
 ) {
   // 只送出一次，因為連線失敗或 500 可能發生在寫入已生效之後。
-  await request(operation, {
+  await post(`auth/${operation}`, token, body);
+}
+
+// 取得最新組織快照；有 signal 時由畫面決定這一輪讀取的有效期限。
+export async function readOrganization(
+  signal?: AbortSignal,
+): Promise<OrganizationDto> {
+  return (await request("admin/organization", { signal })).json();
+}
+
+// 管理寫入沿用同源防偽邊界，成功後由畫面另行查詢保存結果。
+export async function writeOrganization(
+  token: string,
+  operation: OrganizationWrite,
+) {
+  // 只將契約定義的 204 視為寫入確認，其他成功狀態也需要人工讀回。
+  const response = await post(`admin/${operation.path}`, token, operation.body);
+  if (response.status !== 204) throw new Error("無法確認組織寫入回應。");
+}
+
+// 所有 POST 共用防偽標頭與逾時設定，不自動重試可能已生效的操作。
+function post(path: string, token: string, body?: object) {
+  return request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": token },
     body: body ? JSON.stringify(body) : undefined,

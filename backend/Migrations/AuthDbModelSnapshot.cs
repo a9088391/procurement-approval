@@ -174,6 +174,9 @@ namespace Procurement.Api.Migrations
                         .IsConcurrencyToken()
                         .HasColumnType("text");
 
+                    b.Property<string>("DepartmentId")
+                        .HasColumnType("text");
+
                     b.Property<string>("Email")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
@@ -181,11 +184,22 @@ namespace Procurement.Api.Migrations
                     b.Property<bool>("EmailConfirmed")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("FinanceReviewerId")
+                        .HasColumnType("text");
+
                     b.Property<bool>("LockoutEnabled")
                         .HasColumnType("boolean");
 
                     b.Property<DateTimeOffset?>("LockoutEnd")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ManagerReviewerId")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("MustChangePassword")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("NormalizedEmail")
                         .HasMaxLength(256)
@@ -216,6 +230,12 @@ namespace Procurement.Api.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("DepartmentId");
+
+                    b.HasIndex("FinanceReviewerId");
+
+                    b.HasIndex("ManagerReviewerId");
+
                     b.HasIndex("NormalizedEmail")
                         .HasDatabaseName("EmailIndex");
 
@@ -227,6 +247,28 @@ namespace Procurement.Api.Migrations
                         {
                             t.HasCheckConstraint("CK_AccountType", "\"AccountType\" IN ('admin', 'business')");
                         });
+                });
+
+            modelBuilder.Entity("Procurement.Department", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("Active")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Version")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Departments");
                 });
 
             modelBuilder.Entity("Procurement.LoginSession", b =>
@@ -300,6 +342,24 @@ namespace Procurement.Api.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("Procurement.AppUser", b =>
+                {
+                    b.HasOne("Procurement.Department", null)
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Procurement.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("FinanceReviewerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Procurement.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("ManagerReviewerId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("Procurement.LoginSession", b =>

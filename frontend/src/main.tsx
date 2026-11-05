@@ -1,7 +1,14 @@
 // 身分生命週期由單一畫面協調；敏感表單在重新確認身分時卸載，避免跨帳號保留。
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, readSession, writeAuth, type IdentityDto } from "./api";
+import { Organization } from "./Organization";
 import "./style.css";
 
 type Operation = "login" | "change-password" | "logout";
@@ -29,11 +36,51 @@ function App() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [unknownResult, setUnknownResult] = useState(false);
+  const [unknownOrganizationFor, setUnknownOrganizationFor] = useState<
+    string | null
+  >(null);
 
   // token 只留在記憶體，不寫入網址或瀏覽器儲存空間。
   const token = useRef("");
   // ref 同步阻擋同一輪事件重複進入，pending 則負責停用畫面操作。
   const busy = useRef(false);
+  const recovery = useRef<HTMLElement>(null);
+  // 只標記組織觸發的身分恢復；已確認保存的事實獨立於失效指引。
+  const organizationRecovery = useRef<{ confirmedWrite?: string } | null>(null);
+
+  // 身分與組織操作共用閘門，讓重新登入不會與前一個管理操作的讀回交錯。
+  const beginOperation = useCallback(() => {
+    // 同步標記所有權，讓畫面更新前抵達的第二個事件也無法提交。
+    if (busy.current) return false;
+    busy.current = true;
+    setPending(true);
+    return true;
+  }, []);
+
+  // 完成同一輪的寫入和讀回後一併解除兩層閘門，才能開始下一個操作。
+  const finishOperation = useCallback(() => {
+    busy.current = false;
+    setPending(false);
+  }, []);
+
+  // 管理端點拒絕身分或防偽時，先移除組織資料，再由使用者重新確認。
+  const recoverOrganizationSession = useCallback(
+    (notice: string, confirmedWrite?: string) => {
+      // 舊權杖及表單一起清除，保存確認與恢復指引分開供重讀使用。
+      organizationRecovery.current = { confirmedWrite };
+      token.current = "";
+      setIdentity(null);
+      setMessage(notice);
+      setIsError(true);
+      setPhase("recovery");
+    },
+    [],
+  );
+
+  // 舊表單被移除時，把鍵盤焦點帶到恢復區，下一次 Tab 可到重讀按鈕。
+  useEffect(() => {
+    if (phase === "recovery") recovery.current?.focus();
+  }, [phase]);
 
   // 掛載時向後端查證目前身分，以正確處理重新載入頁面的登入狀態。
   useEffect(() => {
@@ -79,15 +126,29 @@ function App() {
   // 手動恢復只讀取 token 與身分，不重送 POST，也不推定先前寫入的成敗。
   async function refresh() {
     // 與 POST 共用同步閘門，重讀期間先隱藏原身分和敏感表單。
-    if (busy.current) return;
-    busy.current = true;
-    setPending(true);
+    if (!beginOperation()) return;
     setPhase("loading");
     setIdentity(null);
 
     // 讀取成功後才顯示對應表單；先前不確定的寫入提示仍由原狀態保留。
     try {
       const session = await readSession();
+      // 組織引發的身分恢復已完成，撤下舊指引但保留已收到的保存確認。
+      if (organizationRecovery.current) {
+        const { confirmedWrite } = organizationRecovery.current;
+        organizationRecovery.current = null;
+        setMessage(confirmedWrite ? `${confirmedWrite}。` : "");
+        setIsError(false);
+      }
+
+      // 手動讀回若確認已換人，清除前一位管理員的未決提示。
+      if (session.identity) {
+        setUnknownOrganizationFor(
+          // 相同帳號仍需要核對先前未確認的操作。
+          (current) =>
+            current === session.identity?.userName ? current : null,
+        );
+      }
       token.current = session.token;
       setIdentity(session.identity);
       setPhase("ready");
@@ -101,8 +162,7 @@ function App() {
       setPhase("recovery");
     } finally {
       // 一併解除事件與畫面層的閘門，讓使用者能依當前狀態操作。
-      busy.current = false;
-      setPending(false);
+      finishOperation();
     }
   }
 
@@ -113,14 +173,20 @@ function App() {
   ) {
     // 接管表單提交並阻擋同一輪重複事件，讓每次操作只送出一次。
     event?.preventDefault();
-    if (busy.current) return;
+    if (!beginOperation()) return;
 
     // 在第一個 await 前擷取本次輸入；後續卸載表單不影響已送出的內容。
     const values = event ? new FormData(event.currentTarget) : null;
+    if (identity?.mustChangePassword && event) {
+      // 臨時憑證流程提交後清空兩個密碼欄位，若遭拒絕需重新輸入。
+      for (const input of event.currentTarget.querySelectorAll<HTMLInputElement>(
+        'input[type="password"]',
+      )) {
+        input.value = "";
+      }
+    }
 
-    // 停用控制項並清空上次的一般提示；未決寫入有獨立狀態。
-    busy.current = true;
-    setPending(true);
+    // 清空上次的一般提示；未決寫入有獨立狀態。
     setMessage("");
     setIsError(false);
 
@@ -149,8 +215,9 @@ function App() {
       // 記下寫入已成功，讓後續讀取失敗仍可顯示正確的操作結果。
       accepted = true;
 
-      // 成功登入或改密碼會解除未知提示；登出保留它供後續恢復。
+      // 成功登入或改密碼會解除身分操作的未知提示；登出清除原管理員的未決提示。
       if (operation !== "logout") setUnknownResult(false);
+      else setUnknownOrganizationFor(null);
 
       // 先卸載舊表單並記下此操作的成功提示，再查證切換後的身分。
       setIdentity(null);
@@ -165,6 +232,14 @@ function App() {
 
       // 重新取得權杖與身分，讓下一個表單對應寫入後的 Cookie 狀態。
       const session = await readSession();
+      // 確認換人後清除前一位管理員的未決提示，避免跨身分出現。
+      if (session.identity) {
+        setUnknownOrganizationFor(
+          // 相同帳號重新登入仍可核對原操作；不同帳號不沿用提示。
+          (current) =>
+            current === session.identity?.userName ? current : null,
+        );
+      }
       token.current = session.token;
       setIdentity(session.identity);
       setPhase("ready");
@@ -209,8 +284,7 @@ function App() {
       }
     } finally {
       // 完成整輪寫入與可能的重讀後才解除閘門，避免下一次操作使用中途狀態。
-      busy.current = false;
-      setPending(false);
+      finishOperation();
     }
   }
 
@@ -237,7 +311,7 @@ function App() {
       ) : null}
       {phase === "recovery" ? (
         // 尚未確認身分時說明手動恢復的用途，讓使用者知道這一步只讀取。
-        <section aria-labelledby="recovery-title">
+        <section aria-labelledby="recovery-title" ref={recovery} tabIndex={-1}>
           <h2 id="recovery-title">請先確認登入狀態</h2>
           <p>重新取得安全權杖與目前身分，不會重送先前的操作。</p>
         </section>
@@ -315,6 +389,11 @@ function App() {
           </section>
           <section aria-labelledby="change-title">
             <h2 id="change-title">變更密碼</h2>
+            {identity.mustChangePassword ? (
+              <p className="feedback" role="status">
+                請先變更臨時密碼。新密碼須與臨時密碼不同，變更後請用新密碼重新登入。
+              </p>
+            ) : null}
             <p className="hint">變更後，包含本次在內的所有登入都會失效。</p>
             <form
               onSubmit={
@@ -353,6 +432,27 @@ function App() {
               </fieldset>
             </form>
           </section>
+          {identity.accountType === "admin" &&
+          identity.roles.includes("Administrator") &&
+          identity.mustChangePassword === false ? (
+            // 確認具管理資格且已解除改密碼限制後，才載入組織資料。
+            <Organization
+              key={identity.userName}
+              getToken={
+                // 實際送出管理寫入時才讀取目前身分的記憶體權杖。
+                () => token.current
+              }
+              pending={pending}
+              beginOperation={beginOperation}
+              finishOperation={finishOperation}
+              onSessionInvalid={recoverOrganizationSession}
+              unknownResult={unknownOrganizationFor === identity.userName}
+              onUnknownResult={
+                // 未決結果只對發出該操作的管理帳號顯示。
+                () => setUnknownOrganizationFor(identity.userName)
+              }
+            />
+          ) : null}
         </>
       ) : null}
       <button

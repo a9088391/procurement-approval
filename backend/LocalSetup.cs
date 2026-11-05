@@ -95,8 +95,8 @@ public static class LocalSetup
         ProtectDirectory(directory);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        // 以交易級 advisory lock 串行同一資料庫的初始化，避免並行建立帳號或憑證。
-        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(80101)", ct);
+        // 與組織管理共用交易級 advisory lock，避免並行建立同名帳號或角色。
+        await db.LockOrganization(ct);
 
         // 憑證檔先保存，資料庫失敗後才能沿用同一組密碼重試，不把密碼寫到 console。
         var path = Path.Combine(directory, "initial-accounts.json");

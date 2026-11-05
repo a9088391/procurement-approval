@@ -1,17 +1,18 @@
-# 身分後端與 API 契約
+# 後端與 API 契約
 
-目前提供本機帳密登入、目前身分、改密碼與登出。管理帳號與業務帳號分離；尚未提供組織管理、請購、復原、展示重設或公開註冊。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
+目前提供本機登入、密碼變更、部門及業務帳號管理。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
 
 ## 入口與責任
 
-- `backend/Program.cs`：組態、migration、Cookie／CSRF，並呼叫 `MapAuthEndpoints()` 註冊身分 API。
+- `backend/Program.cs`：組態、migration、Cookie／CSRF 與強制改密碼防護，並掛載身分和管理 API。
 - `backend/AuthEndpoints.cs`：以 `MapGroup("/api/auth")` 定義身分 Minimal API。發出 CSRF 權杖，其餘操作交給 `AuthService`。
 - `backend/AuthModel.cs`：Identity 帳號、伺服器端登入紀錄、EF 對應與明確 DTO。
 - `backend/AuthService.cs`：登入、鎖定、密碼長度、登入期限、撤銷及交易規則。
+- `backend/OrganizationEndpoints.cs`、`OrganizationModel.cs`、`OrganizationService.cs` 負責管理路由、部門與管理 DTO，以及設定資格、驗證、版本和交易。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
-不把 EF 實體當作 HTTP 輸入，也不建立通用 Repository。新增帳號或角色管理時，所有帳號資格、密碼及登入異動必須在同一交易先鎖定 `AspNetUsers` 對應帳號列，再檢查當下資料。管理帳號不能授予業務操作資格。
+HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交易內鎖定 `AspNetUsers` 對應帳號列，再檢查當下資料。管理帳號與業務帳號各有獨立資格。
 
 ## HTTP
 
@@ -21,11 +22,11 @@
 | --- | --- | --- |
 | `GET /api/auth/csrf` | 無 | `200 {"token":"…"}`，並設定防偽 Cookie |
 | `POST /api/auth/login` | `{"userName":"帳號","password":"使用者輸入"}` | `204`，設定登入 Cookie |
-| `GET /api/auth/me` | 登入 Cookie | `200 {"userName":"…","accountType":"admin 或 business","roles":["…"],"version":"…"}` |
+| `GET /api/auth/me` | 登入 Cookie | `200 {"userName":"…","accountType":"admin 或 business","roles":["…"],"version":"…","mustChangePassword":false}` |
 | `POST /api/auth/change-password` | `{"currentPassword":"使用者輸入","newPassword":"使用者輸入","version":"me 的版本"}` | `204`，撤銷全部登入並清除呼叫者 Cookie |
 | `POST /api/auth/logout` | 無本文 | `204`，僅撤銷這次登入並清除 Cookie |
 
-`roles` 目前使用 `Administrator`、`Applicant`、`Manager`、`Finance`；回應按名稱排序。角色及啟用狀態從資料庫讀取，Cookie 只帶帳號與登入識別，不帶授權角色。`version` 是不透明值，直接傳回即可。
+`roles` 目前使用 `Administrator`、`Applicant`、`Manager`、`Finance`，回應按名稱排序。角色、啟用與強制改密碼狀態從資料庫讀取。Cookie 保存帳號及登入識別。`version` 是不透明值，直接傳回即可。`mustChangePassword` 為 `true` 時，現有登入只允許讀取身分、取得 CSRF 權杖、改密碼與登出。改密碼後須用不同於暫時密碼的新密碼登入。
 
 首次顯示登入表單前取得防偽 token；登入成功後重新取得，再讀 `me`。切換帳號、登出或改密碼後，重新取得 token，避免使用綁定舊身分的 token。改密碼成功會使所有舊登入立即失效，前端應回到登入表單並顯示成功訊息。無權杖或不合法權杖的變更不寫入帳號、密碼、登入或鎖定狀態，也不延長閒置期限。
 
@@ -38,12 +39,32 @@
 | 400 | `wrong_password` | 修正目前密碼 |
 | 401 | `invalid_credentials` | 登入帳密不正確，或帳號不可使用 |
 | 401 | `unauthenticated` | 回登入表單；不會回傳 HTML 轉址 |
-| 409 | `stale_version` | 重新讀取目前身分，避免覆寫過期版本 |
+| 403 | `forbidden` | 使用符合資格的身分，或先變更臨時密碼 |
+| 404 | `not_found` | 重新讀取設定，確認目標存在且可管理 |
+| 409 | `stale_version` | 重新讀取目前身分或設定，避免覆寫新版本 |
+| 409 | `duplicate_user_name` | 選擇其他帳號名稱 |
 | 423 | `account_locked` | 連續失敗已鎖定，等待解除後由使用者重試 |
 | 429 | `rate_limited` | 同來源登入過密，稍後再由使用者重試 |
 | 500 | `server_error` | 結果未確認；先重新讀取身分或由使用者重新登入確認，不自動重送 |
 
 受保護端點先辨識登入；未登入或登入已失效時回 `401 unauthenticated`，不讓舊身分綁定的 token 把撤銷誤報為 CSRF 錯誤。登入仍有效時，缺少或不合法 CSRF 回 `400 invalid_csrf`。匿名登入端點同樣必須通過 CSRF，才能執行帳密檢查與登入寫入。
+
+## 組織管理 API
+
+以下操作只接受啟用中的管理帳號及有效登入，寫入也會在交易中重查資格。管理設定只包含部門與業務帳號。JSON 欄位使用 camelCase，所有 `POST` 都要帶 `X-CSRF-TOKEN`。
+
+| 端點 | 請求本文 | 成功 |
+| --- | --- | --- |
+| `GET /api/admin/organization` | 無 | `200`，回傳 `departments` 及 `accounts` |
+| `POST /api/admin/departments` | `name` | `204` |
+| `POST /api/admin/departments/{id}` | `name`、`active`、`version` | `204` |
+| `POST /api/admin/accounts` | `userName`、`password`、`departmentId`、`isManager`、`isFinance` | `204` |
+| `POST /api/admin/accounts/{id}` | `version`、`active`、`departmentId`、`isManager`、`isFinance`、`managerReviewerId`、`financeReviewerId` | `204` |
+| `POST /api/admin/accounts/{id}/reset-password` | `version`、`newPassword` | `204` |
+
+部門資料包含 `id`、`name`、`active`、`version`。帳號資料包含 `id`、`userName`、`mustChangePassword` 及帳號保存所需欄位。管理端點不回傳密碼、雜湊或登入識別。布林欄位要明確提供；更新時可用 `null` 保留舊帳號原本未分配部門的狀態，或清除預設人選。送出較舊版本會得到 `409 stale_version`，請重新讀取設定再決定如何修改。
+
+部門名稱修剪首尾空白後須為 1–100 個 UTF-16 字元。新帳號名稱同樣修剪首尾空白，須為 1–64 個 UTF-16 字元，重複名稱以不分大小寫判斷。部門名稱、新帳號名稱、臨時密碼及強制改密碼的新密碼都必須能由單行表單輸入，任何位置含 CR 或 LF 均回 `400 invalid_input`。密碼長度 12–128 個 UTF-16 字元，首尾空白會保留。新業務帳號具申請人角色，主管與財務可兼任。重設時需使用不同於現有密碼的臨時密碼。新分配部門須為啟用狀態，原有歸屬可保留。新選的預設審核人須啟用、有對應角色，且申請人和兩位審核人各自不同。停用或撤權保留指向該人選的設定，管理員可查閱並替換。
 
 ## 安全及一致性
 
@@ -55,6 +76,8 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 資料庫交易已提交後，Cookie 或 HTTP 回應仍可能傳送失敗；此時收到錯誤不代表操作未生效。前端應重新確認身分或請使用者登入，不自動重送密碼變更。交易內故障的回滾保證，不能延伸成所有 HTTP 500 都無寫入。
 
+組織操作與本機初始化先取得同一 PostgreSQL transaction advisory lock，再鎖定操作者與目標帳號。部門資格、預設人選、版本和角色更新因此依交易順序判定。成功的管理寫入在同一筆交易更新操作者這次登入的活動時間，絕對期限仍以登入建立時間計算。停用帳號或重設密碼會在同一筆交易撤銷所有登入。重新啟用後須重新登入，原 Cookie 已失效。
+
 ## 固定工具鏈與開發
 
 SDK `10.0.403`，ASP.NET Core／Identity／EF `10.0.14`，Npgsql EF provider `10.0.3`，PostgreSQL `18.6`。`global.json` 禁止 SDK roll-forward，NuGet lock files 固定相依；Npgsql 要求 EF `[10.0.4, 11.0.0)`，目前固定版本符合。
@@ -65,4 +88,4 @@ SDK `10.0.403`，ASP.NET Core／Identity／EF `10.0.14`，Npgsql EF provider `10
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests sh -c 'dotnet tool restore && dotnet ef migrations add 名稱 --project backend'
 ```
 
-產生檔由工具管理，不手改。啟動使用 `MigrateAsync` 套用 migration；日後若變更既有資料或 schema，應另評估相容、備份及復原。本版為全新資料庫的初始 migration，無既有資料轉換。
+啟動使用 `MigrateAsync` 套用 migration，產生檔由工具管理。`OrganizationManagement` 新增部門與帳號欄位，既有帳號以未分配部門、未設定預設人選、無強制改密碼要求的狀態升級，保留原識別與憑證。降版移除新欄位及部門表會遺失組織設定與強制改密碼狀態，已變更的帳密及角色仍保留。若需回到升級前資料，須使用升級前的資料庫備份與相符的應用版本。

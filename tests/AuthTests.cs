@@ -44,6 +44,7 @@ public sealed class AuthTests
         var identity = await Harness.Me(client);
         Assert.Equal(app.UserName, identity.UserName);
         Assert.Equal("business", identity.AccountType);
+        Assert.False(identity.MustChangePassword);
 
         // 沿用同一個 Cookie 修改資料庫角色，確認授權資訊沒有被 Cookie 快取。
         await app.WithDb(async db =>

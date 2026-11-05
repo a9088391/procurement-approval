@@ -14,12 +14,19 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
     // 檢查密碼長度。依 .NET 的 UTF-16 單位計算，保留使用者輸入的空白。
     public static bool ValidPassword(string? value) => value is { Length: >= 12 and <= 128 };
 
+    // 單行欄位只拒絕 CR 與 LF，其他字元仍由各欄位沿用原有規則處理。
+    internal static bool ContainsCrOrLf(string? value) => value.AsSpan().ContainsAny('\r', '\n');
+
     // 將狀態碼和錯誤內容組成 JSON，讓呼叫端以穩定代碼決定恢復方式。
     public static IResult Error(int status, string code, string message) =>
         Results.Json(new ErrorResponse(code, message), statusCode: status);
 
     // 以共用的 JSON 401 表示登入無效，讓所有受保護端點都能引導重新登入。
     public static IResult Unauthorized() => Error(401, "unauthenticated", "請重新登入。");
+
+    // 沿用 Identity 雜湊驗證，讓登入、改密碼及重設共用對目前憑證的判定。
+    internal bool PasswordMatches(AppUser user, string password) => user.PasswordHash is { } hash
+        && hasher.VerifyHashedPassword(user, hash, password) != PasswordVerificationResult.Failed;
 
     // 在呼叫端的交易內鎖定並讀取帳號，讓同一帳號的驗證與異動按交易順序處理。
     public Task<AppUser?> LockUser(string id, CancellationToken ct)
@@ -52,6 +59,33 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
             ? session
             : null;
     }
+
+    // 在呼叫端的交易內取得帳號及有效登入，供身分讀取與受保護異動重新確認授權。
+    internal async Task<AppUser?> CurrentLockedUser(ClaimsPrincipal principal, CancellationToken ct)
+    {
+        // 帳號列鎖與登入檢查採固定順序，避免撤銷在兩個步驟之間生效。
+        var user = await LockUser(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? "", ct);
+        return user is not null && await CurrentSession(user, principal, ct) is not null ? user : null;
+    }
+
+    // 呼叫端持有已驗證操作者的帳號列鎖；直接更新該次登入，以免異動目標時清除追蹤而遺漏紀錄。
+    internal Task RecordSessionActivity(string userId, ClaimsPrincipal principal, CancellationToken ct)
+    {
+        // 只更新這次登入的最後活動時間，保留建立時間及同帳號的其他登入。
+        var id = principal.FindFirstValue("session");
+        var now = clock.GetUtcNow();
+        return db
+            .Sessions
+            .Where(s => s.Id == id && s.UserId == userId)
+            .ExecuteUpdateAsync(update => update.SetProperty(s => s.LastSeenAt, now), ct);
+    }
+
+    // 從 Identity 的角色對應查詢目前角色，讓身分端點與管理授權採相同來源。
+    internal IQueryable<string> RoleNames(string userId) =>
+        from ur in db.UserRoles
+        join role in db.Roles on ur.RoleId equals role.Id
+        where ur.UserId == userId
+        select role.Name ?? "";
 
     // 驗證帳密並建立登入。HTTP 入口先檢查防偽與節流，此處用列鎖協調失敗計數和登入寫入。
     public async Task<IResult> Login(LoginRequest request, HttpContext http, CancellationToken ct)
@@ -89,8 +123,7 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
         }
 
         // 用 Identity 驗證保存的雜湊，並在同一交易內累計失敗。
-        if (user.PasswordHash is null
-            || hasher.VerifyHashedPassword(user, user.PasswordHash, password) == PasswordVerificationResult.Failed)
+        if (!PasswordMatches(user, password))
         {
             // 達失敗門檻才開始新一輪鎖定。
             if (++user.AccessFailedCount >= 5)
@@ -135,33 +168,28 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
         return Results.NoContent();
     }
 
-    // 回傳目前身分、角色與改密碼版本。從資料庫取值，讓 Cookie 發出後的帳號變更也能反映。
+    // 在同一帳號列鎖下讀取有效登入、角色與改密碼版本，讓 Cookie 發出後的變更也能反映。
     public async Task<IResult> Me(ClaimsPrincipal principal, CancellationToken ct)
     {
-        // Cookie 已由 SessionEvents 驗證，仍重新查詢啟用狀態，避免回傳追蹤中的舊帳號。
-        var id = principal.FindFirstValue(ClaimTypes.NameIdentifier);
-        var user = await db
-            .Users
-            .AsNoTracking()
-            .SingleOrDefaultAsync(u => u.Id == id && u.Active, ct);
+        // 即使 middleware 已驗證 Cookie，仍在列鎖下確認登入尚未被停用或撤銷。
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var user = await CurrentLockedUser(principal, ct);
         if (user is null)
             return Unauthorized();
 
-        // 直接連接角色對應表並排序，讓回應反映目前授權且順序固定。
-        var roles = await (
-            from ur in db.UserRoles
-            join role in db.Roles on ur.RoleId equals role.Id
-            where ur.UserId == user.Id
-            select role.Name ?? "")
+        // 角色異動也使用同一列鎖，因此排序後的角色與帳號版本屬於同一次讀取。
+        var roles = await RoleNames(user.Id)
             .OrderBy(r => r)
             .ToArrayAsync(ct);
+        await tx.CommitAsync(ct);
 
         // 只傳回前端需要的身分資料，並讓改密碼可帶回當次讀取的版本。
         return Results.Ok(new IdentityResponse(
             user.UserName ?? "",
             user.AccountType,
             roles,
-            user.ConcurrencyStamp ?? ""));
+            user.ConcurrencyStamp ?? "",
+            user.MustChangePassword));
     }
 
     // 更換密碼並撤銷所有登入。重查登入與版本，並共用交易以確保密碼與撤銷一起生效。
@@ -177,8 +205,8 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
 
         // 取得帳號列鎖後再驗證登入，避免使用 middleware 先前已通過的結果。
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var user = await LockUser(http.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "", ct);
-        if (user is null || await CurrentSession(user, http.User, ct) is null)
+        var user = await CurrentLockedUser(http.User, ct);
+        if (user is null)
             return Unauthorized();
 
         // 只接受與目前帳號相符的版本，避免覆寫較新的資料。
@@ -186,23 +214,17 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
             return Error(409, "stale_version", "資料已變更，請重新取得目前身分。");
 
         // 有效登入仍須提供目前密碼，避免僅憑 Cookie 便能變更憑證。
-        if (user.PasswordHash is null
-            || hasher.VerifyHashedPassword(user, user.PasswordHash, currentPassword)
-                == PasswordVerificationResult.Failed)
+        if (!PasswordMatches(user, currentPassword))
             return Error(400, "wrong_password", "目前密碼不正確。");
 
-        // 更新密碼雜湊與版本，同時清除原憑證的鎖定狀態。
-        user.PasswordHash = hasher.HashPassword(user, newPassword);
-        user.SecurityStamp = Guid.NewGuid().ToString();
-        user.ConcurrencyStamp = Guid.NewGuid().ToString();
-        user.AccessFailedCount = 0;
-        user.LockoutEnd = null;
+        // 強制改密碼的新值須能在單行欄位輸入，並與臨時密碼不同。
+        if (user.MustChangePassword && ContainsCrOrLf(newPassword))
+            return Error(400, "invalid_input", "新密碼不可包含換行。");
+        if (user.MustChangePassword && newPassword == currentPassword)
+            return Error(400, "invalid_input", "新密碼必須與臨時密碼不同。");
 
-        // 刪除與雜湊更新同一交易提交；任一步失敗都不能留下半套密碼或登入撤銷。
-        await db
-            .Sessions
-            .Where(s => s.UserId == user.Id)
-            .ExecuteDeleteAsync(ct);
+        // 解除強制狀態、保存新憑證及撤銷登入同一交易提交，失敗時一起回滾。
+        await ReplaceCredentials(user, newPassword, false, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
 
@@ -210,6 +232,27 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
         await http.SignOutAsync(Scheme);
         return Results.NoContent();
     }
+
+    // 呼叫端持有帳號列鎖並提交交易；自助變更與管理重設共用憑證寫入及撤銷。
+    internal async Task ReplaceCredentials(AppUser user, string password, bool mustChangePassword, CancellationToken ct)
+    {
+        // 換新雜湊與版本，並清除舊憑證累積的登入失敗與鎖定狀態。
+        user.PasswordHash = hasher.HashPassword(user, password);
+        user.SecurityStamp = Guid.NewGuid().ToString();
+        user.ConcurrencyStamp = Guid.NewGuid().ToString();
+        user.MustChangePassword = mustChangePassword;
+        user.AccessFailedCount = 0;
+        user.LockoutEnd = null;
+
+        // 在同一交易撤銷所有舊登入，即使持有舊 Cookie 也必須重登。
+        await RevokeSessions(user.Id, ct);
+    }
+
+    // 在呼叫端持有帳號列鎖的交易內整批撤銷，供停用與密碼變更共用。
+    internal Task RevokeSessions(string userId, CancellationToken ct) => db
+        .Sessions
+        .Where(s => s.UserId == userId)
+        .ExecuteDeleteAsync(ct);
 
     // 撤銷目前登入並清除 Cookie。以單筆登入紀錄為範圍，保留其他裝置的登入。
     public async Task<IResult> Logout(HttpContext http, CancellationToken ct)
@@ -234,6 +277,8 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
 // 每次 Cookie 驗證回查登入紀錄；資料庫的撤銷與期限不等待 Cookie 自己到期。
 public sealed class SessionEvents(AuthDb db, AuthService auth, TimeProvider clock) : CookieAuthenticationEvents
 {
+    internal static readonly object PasswordChangeRequired = new();
+
     // 驗證 Cookie 對應的登入，並按請求方法更新閒置時間，讓伺服器端撤銷立即生效。
     public override async Task ValidatePrincipal(CookieValidatePrincipalContext context)
     {
@@ -248,11 +293,18 @@ public sealed class SessionEvents(AuthDb db, AuthService auth, TimeProvider cloc
             : await auth.CurrentSession(user, context.Principal, ct);
         if (session is null)
             context.RejectPrincipal();
-        else if (!HttpMethods.IsPost(context.HttpContext.Request.Method))
+        else
         {
-            // POST 的防偽驗證尚未執行，不讓無效變更請求延長登入或寫入狀態。
-            session.LastSeenAt = clock.GetUtcNow();
-            await db.SaveChangesAsync(ct);
+            // 強制改密碼只標記在本次請求，避免把會變更的狀態寫進 Cookie。
+            if (user?.MustChangePassword == true)
+                context.HttpContext.Items[PasswordChangeRequired] = true;
+
+            // POST 仍待防偽與輸入驗證；管理寫入成功後才由其交易記錄活動。
+            if (!HttpMethods.IsPost(context.HttpContext.Request.Method))
+            {
+                session.LastSeenAt = clock.GetUtcNow();
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         // 提交活動更新並釋放列鎖，讓後續異動可取得當下的狀態。
