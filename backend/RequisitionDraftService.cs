@@ -40,7 +40,7 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
                 Id = id,
                 Number = $"PR-{id:N}",
                 ApplicantId = applicantId,
-                CreatedAt = CurrentTimestamp()
+                CreatedAt = Requisition.CurrentTimestamp(clock)
             };
             ApplyContent(draft, input, draft.CreatedAt);
             db.Requisitions.Add(draft);
@@ -66,7 +66,7 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
                 .RequisitionLines
                 .Where(line => line.RequisitionId == draft.Id)
                 .ExecuteDeleteAsync(ct);
-            ApplyContent(draft, input, CurrentTimestamp());
+            ApplyContent(draft, input, Requisition.CurrentTimestamp(clock));
             return Results.Ok(Response(draft));
         }, ct);
 
@@ -132,13 +132,6 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
         if (includeLines)
             query = query.Include(draft => draft.Lines);
         return query.SingleOrDefaultAsync(d => d.Id == draftId, ct);
-    }
-
-    // 使用資料庫的微秒精度，讓保存回應與重開讀到的 UTC 時間一致。
-    private DateTimeOffset CurrentTimestamp()
-    {
-        var now = clock.GetUtcNow();
-        return now.AddTicks(-(now.Ticks % 10));
     }
 
     // 只套用可編輯欄位及其衍生值，保存時一併發出新版本。

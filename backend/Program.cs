@@ -42,13 +42,14 @@ builder
     .AddRoles<IdentityRole>()
     .AddEntityFrameworkStores<AuthDb>();
 
-// 時鐘和來源節流全程序共用。登入、管理、草稿服務及 Cookie 事件跟隨請求並共用 DbContext。
+// 時鐘和來源節流全程序共用。登入、管理、請購服務及 Cookie 事件跟隨請求並共用 DbContext。
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<LoginThrottle>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<SessionEvents>();
 builder.Services.AddScoped<OrganizationService>();
 builder.Services.AddScoped<RequisitionDraftService>();
+builder.Services.AddScoped<RequisitionApprovalService>();
 
 // 讓格式錯誤走共用的 JSON 錯誤處理，而非由路由直接產生空回應。
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
@@ -195,13 +196,13 @@ app.Use(async (http, next) =>
         return;
     }
 
-    // 草稿 GET 若附上權杖，須與當次 Cookie 身分一致，避免共用 Cookie 的舊頁讀到另一帳號的資料。
-    var draftReadWithToken = HttpMethods.IsGet(http.Request.Method)
-        && requestPath.StartsWithSegments("/api/requisitions/drafts")
+    // 請購 GET 若附上權杖，須與當次 Cookie 身分一致，避免共用 Cookie 的舊頁讀到另一帳號的資料。
+    var requisitionReadWithToken = HttpMethods.IsGet(http.Request.Method)
+        && requestPath.StartsWithSegments("/api/requisitions")
         && http.Request.Headers.ContainsKey(AuthEndpoints.CsrfHeaderName);
 
-    // 所有 API POST 都要求權杖，直接使用 Cookie 的草稿 GET 仍可省略標頭。
-    if ((api && post) || draftReadWithToken)
+    // 所有 API POST 都要求權杖，直接使用 Cookie 的請購 GET 仍可省略標頭。
+    if ((api && post) || requisitionReadWithToken)
     {
         try
         {
@@ -242,6 +243,7 @@ app.Use(async (http, next) =>
 app.MapAuthEndpoints();
 app.MapOrganizationEndpoints();
 app.MapRequisitionDraftEndpoints();
+app.MapRequisitionApprovalEndpoints();
 
 // 讓編譯後的前端與 API 使用同一來源，瀏覽器可直接帶上登入 Cookie。
 app.UseDefaultFiles();

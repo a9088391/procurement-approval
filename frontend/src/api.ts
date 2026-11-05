@@ -111,6 +111,44 @@ export interface DraftDto extends DraftSummaryDto {
   createdAt: string;
 }
 
+// 簽核查詢只公開可見摘要；角色資格及暫停狀態採用 API 的目前判斷。
+type RequisitionPerson = { id: string; userName: string };
+
+export interface RequisitionSummaryDto extends DraftSummaryDto {
+  applicant: RequisitionPerson;
+  status:
+    "draft" | "manager_pending" | "finance_pending" | "approved" | "rejected";
+  estimatedAmount: number | null;
+  version: string;
+  createdAt: string;
+  paused: boolean;
+  canDecide: boolean;
+  round: {
+    number: number;
+    department: { id: string; name: string };
+    submittedAt: string;
+    manager: RequisitionPerson;
+    finance: RequisitionPerson;
+  } | null;
+}
+
+// 明細另含已保存內容及歷程；送審後的內容、人選和部門取自該輪快照。
+export interface RequisitionDetailDto extends RequisitionSummaryDto {
+  purpose: string | null;
+  lines: DraftDto["lines"];
+  isComplete: boolean;
+  canSubmit: boolean;
+  history: {
+    roundNumber: number;
+    kind: "submitted" | "approved" | "rejected";
+    stage: "manager" | "finance" | null;
+    actor: RequisitionPerson;
+    occurredAt: string;
+  }[];
+}
+
+export type ApprovalAction = "submit" | "approve" | "reject";
+
 // 防偽端點回應只供本次頁面的後續寫入使用。
 interface CsrfResponseDto {
   token: string;
@@ -209,7 +247,8 @@ export async function writeOrganization(
   if (response.status !== 204) throw new Error("無法確認組織寫入回應。");
 }
 
-const draftPath = "requisitions/drafts";
+const requisitionPath = "requisitions";
+const draftPath = `${requisitionPath}/drafts`;
 
 // 清單 GET 附上畫面身分的權杖，避免共用 Cookie 切換帳號後採用另一人的資料。
 export async function readDraftList(
@@ -261,6 +300,190 @@ export async function deleteDraft(
     { version },
   );
   if (response.status !== 204) throw new Error("無法確認草稿刪除回應。");
+}
+
+// 和草稿 GET 一樣，查詢必須驗證目前畫面身分與共享 Cookie 的配對。
+export async function readRequisitions(
+  token: string,
+  signal?: AbortSignal,
+): Promise<RequisitionSummaryDto[]> {
+  return (
+    await request(requisitionPath, {
+      signal,
+      headers: { "X-CSRF-TOKEN": token },
+    })
+  ).json();
+}
+
+// 明細及歷程由同一個已授權回應取得，且同時提供下一次操作需要的版本。
+export async function readRequisition(
+  token: string,
+  id: string,
+): Promise<RequisitionDetailDto> {
+  const response = await request(
+    `${requisitionPath}/${encodeURIComponent(id)}`,
+    {
+      headers: { "X-CSRF-TOKEN": token },
+    },
+  );
+  return decodeRequisitionDetail(response, id);
+}
+
+// 每次只提交讀取時的版本，收到 200 即確認交易；內容無法解讀時交由畫面提供讀回入口。
+export async function writeApproval(
+  token: string,
+  action: ApprovalAction,
+  { id, version }: Pick<RequisitionDetailDto, "id" | "version">,
+): Promise<RequisitionDetailDto | null> {
+  // 只有契約定義的成功狀態能確認寫入，其他回應須保留不確定性。
+  const response = await post(
+    `${requisitionPath}/${encodeURIComponent(id)}/${action}`,
+    token,
+    { version },
+  );
+  if (response.status !== 200) throw new Error("無法確認簽核寫入回應。");
+
+  // 已確認寫入後，回應內容遺失只影響讀取，不改變交易結果。
+  try {
+    return await decodeRequisitionDetail(response, id);
+  } catch {
+    return null;
+  }
+}
+
+const requisitionStatuses = new Set<unknown>([
+  "draft",
+  "manager_pending",
+  "finance_pending",
+  "approved",
+  "rejected",
+] satisfies RequisitionDetailDto["status"][]);
+
+// 將回應的物件與純量分開，讓下列欄位在檢查前維持未知型別。
+function isRecord(candidate: unknown): candidate is Record<string, unknown> {
+  return (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    !Array.isArray(candidate)
+  );
+}
+
+// 單號、識別與版本必須有內容，才能辨認同一筆資料及提交版本。
+function isNonBlankText(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+// 尚未填寫的草稿欄位保留 null，以區分欄位遺失或型別錯誤。
+function isNullableText(value: unknown) {
+  return value === null || typeof value === "string";
+}
+
+// 只採用可呈現的有限數字；未填的草稿數量及金額保留 null。
+function isNullableNumber(value: unknown) {
+  return (
+    value === null || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+// 時間先確認可解析，避免將無效時間交給 Intl.DateTimeFormat。
+function isTimestamp(value: unknown) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+// 送審輪次從第一輪開始，歷程和快照共用相同的輪次表示。
+function isRoundNumber(roundNumber: unknown) {
+  return (
+    typeof roundNumber === "number" &&
+    Number.isSafeInteger(roundNumber) &&
+    roundNumber > 0
+  );
+}
+
+// 各類參與人員沿用相同欄位，歷程允許保留舊人員的空白顯示名稱。
+function isRequisitionPerson(value: unknown) {
+  return (
+    isRecord(value) &&
+    isNonBlankText(value.id) &&
+    typeof value.userName === "string"
+  );
+}
+
+// 已送審的輪次須能顯示當時的部門、時間與兩位審核者。部門名稱由後端驗證，前端只檢查型別並保留原值。
+function isRequisitionRound(value: unknown) {
+  return (
+    isRecord(value) &&
+    isRoundNumber(value.number) &&
+    isRecord(value.department) &&
+    isNonBlankText(value.department.id) &&
+    typeof value.department.name === "string" &&
+    isTimestamp(value.submittedAt) &&
+    isRequisitionPerson(value.manager) &&
+    isRequisitionPerson(value.finance)
+  );
+}
+
+// 明細仍可包含不完整草稿，但每一列須有約定的欄位才能呈現。
+function isRequisitionLine(value: unknown) {
+  return (
+    isRecord(value) &&
+    isNullableText(value.itemName) &&
+    isNullableText(value.unit) &&
+    isNullableNumber(value.quantity) &&
+    isNullableNumber(value.unitPrice) &&
+    isNullableNumber(value.estimatedAmount)
+  );
+}
+
+// 送審沒有審核關卡；有審核決定時必須能辨識主管或財務。
+function isRequisitionHistoryEntry(value: unknown) {
+  return (
+    isRecord(value) &&
+    isRoundNumber(value.roundNumber) &&
+    isRequisitionPerson(value.actor) &&
+    isTimestamp(value.occurredAt) &&
+    (value.kind === "submitted"
+      ? value.stage === null
+      : (value.kind === "approved" || value.kind === "rejected") &&
+        (value.stage === "manager" || value.stage === "finance"))
+  );
+}
+
+// 驗證同一筆請購的版本、動作旗標及可呈現資料，業務資格仍由後端決定。
+function isRequisitionDetail(
+  value: unknown,
+  id: string,
+): value is RequisitionDetailDto {
+  return (
+    isRecord(value) &&
+    value.id === id &&
+    isNonBlankText(value.version) &&
+    isNonBlankText(value.number) &&
+    requisitionStatuses.has(value.status) &&
+    isNullableText(value.subject) &&
+    isNullableText(value.purpose) &&
+    isRequisitionPerson(value.applicant) &&
+    isNullableNumber(value.estimatedAmount) &&
+    isTimestamp(value.createdAt) &&
+    isTimestamp(value.updatedAt) &&
+    typeof value.paused === "boolean" &&
+    typeof value.canDecide === "boolean" &&
+    typeof value.isComplete === "boolean" &&
+    typeof value.canSubmit === "boolean" &&
+    (value.status === "draft"
+      ? value.round === null
+      : isRequisitionRound(value.round)) &&
+    Array.isArray(value.lines) &&
+    value.lines.every(isRequisitionLine) &&
+    Array.isArray(value.history) &&
+    value.history.every(isRequisitionHistoryEntry)
+  );
+}
+
+// GET 和 POST 200 採用同一明細格式；資料無效時讓呼叫端保留讀回入口。
+async function decodeRequisitionDetail(response: Response, id: string) {
+  const value: unknown = await response.json();
+  if (!isRequisitionDetail(value, id)) throw new Error("請購明細格式不符。");
+  return value;
 }
 
 // 所有 POST 共用防偽標頭與逾時設定，不自動重試可能已生效的操作。

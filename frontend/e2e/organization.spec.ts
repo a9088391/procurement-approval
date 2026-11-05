@@ -184,6 +184,9 @@ test("組織管理建立、重讀、雙審核人及強制改密碼", async ({ pa
   await login(page, "admin", accounts.admin);
   const organization = page.getByRole("region", { name: "組織管理" });
   await expect(organization).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "請購功能" })).toHaveCount(
+    0,
+  );
   await expect(
     organization.getByRole("form", { name: "新增部門" }),
   ).toBeVisible();
@@ -340,6 +343,9 @@ test("組織管理建立、重讀、雙審核人及強制改密碼", async ({ pa
       businessPage,
       "請先變更臨時密碼。新密碼須與臨時密碼不同，變更後請用新密碼重新登入。",
     );
+    await expect(
+      businessPage.getByRole("navigation", { name: "請購功能" }),
+    ).toHaveCount(0);
     await expect(
       businessPage.getByRole("heading", { name: "組織管理", exact: true }),
     ).toHaveCount(0);

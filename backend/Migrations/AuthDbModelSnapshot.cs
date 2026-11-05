@@ -347,6 +347,51 @@ namespace Procurement.Api.Migrations
                     b.ToTable("Requisitions", (string)null);
                 });
 
+            modelBuilder.Entity("Procurement.RequisitionApprovalEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("ActorId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("RequisitionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("RoundNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ActorId");
+
+                    b.HasIndex("RequisitionId", "RoundNumber", "Stage")
+                        .IsUnique();
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("RequisitionId", "RoundNumber", "Stage"), false);
+
+                    b.ToTable("RequisitionApprovalEvents", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_KindStage", "(\"Kind\" = 'submitted' AND \"Stage\" IS NULL) OR\n(\"Kind\" IN ('approved', 'rejected') AND \"Stage\" IS NOT NULL AND \"Stage\" IN ('manager', 'finance'))");
+                        });
+                });
+
             modelBuilder.Entity("Procurement.RequisitionLine", b =>
                 {
                     b.Property<Guid>("RequisitionId")
@@ -373,6 +418,52 @@ namespace Procurement.Api.Migrations
                     b.HasKey("RequisitionId", "Position");
 
                     b.ToTable("RequisitionLines", (string)null);
+                });
+
+            modelBuilder.Entity("Procurement.RequisitionRound", b =>
+                {
+                    b.Property<Guid>("RequisitionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("DepartmentId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DepartmentName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("FinanceId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ManagerId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("SubmittedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("RequisitionId", "Number");
+
+                    b.HasIndex("DepartmentId");
+
+                    b.HasIndex("FinanceId");
+
+                    b.HasIndex("ManagerId");
+
+                    b.ToTable("RequisitionRounds", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RequisitionRounds_DistinctReviewers", " \"ManagerId\" <> \"FinanceId\" ");
+                        });
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
@@ -462,6 +553,23 @@ namespace Procurement.Api.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Procurement.RequisitionApprovalEvent", b =>
+                {
+                    b.HasOne("Procurement.AppUser", "Actor")
+                        .WithMany()
+                        .HasForeignKey("ActorId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Procurement.RequisitionRound", null)
+                        .WithMany("History")
+                        .HasForeignKey("RequisitionId", "RoundNumber")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Actor");
+                });
+
             modelBuilder.Entity("Procurement.RequisitionLine", b =>
                 {
                     b.HasOne("Procurement.Requisition", null)
@@ -471,9 +579,47 @@ namespace Procurement.Api.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Procurement.RequisitionRound", b =>
+                {
+                    b.HasOne("Procurement.Department", null)
+                        .WithMany()
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Procurement.AppUser", "Finance")
+                        .WithMany()
+                        .HasForeignKey("FinanceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Procurement.AppUser", "Manager")
+                        .WithMany()
+                        .HasForeignKey("ManagerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Procurement.Requisition", null)
+                        .WithMany("Rounds")
+                        .HasForeignKey("RequisitionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Finance");
+
+                    b.Navigation("Manager");
+                });
+
             modelBuilder.Entity("Procurement.Requisition", b =>
                 {
                     b.Navigation("Lines");
+
+                    b.Navigation("Rounds");
+                });
+
+            modelBuilder.Entity("Procurement.RequisitionRound", b =>
+                {
+                    b.Navigation("History");
                 });
 #pragma warning restore 612, 618
         }

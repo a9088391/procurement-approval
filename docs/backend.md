@@ -1,16 +1,18 @@
 # 後端與 API 契約
 
-目前提供本機登入、密碼變更、部門及業務帳號管理，以及本人請購草稿。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
+目前提供本機登入、密碼變更、部門及業務帳號管理，以及本人請購草稿、固定兩關簽核與分權查閱。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
 
 ## 入口與責任
 
-- `backend/Program.cs` 負責組態、migration、Cookie／CSRF 與強制改密碼防護，並掛載身分、管理和草稿 API。
+- `backend/Program.cs` 負責組態、migration、Cookie／CSRF 與強制改密碼防護，並掛載身分、管理、草稿與簽核 API。
 - `backend/AuthEndpoints.cs`：以 `MapGroup("/api/auth")` 定義身分 Minimal API。發出 CSRF 權杖，其餘操作交給 `AuthService`。
 - `backend/AuthModel.cs`：Identity 帳號、伺服器端登入紀錄、EF 對應與明確 DTO。
 - `backend/AuthService.cs`：登入、鎖定、密碼長度、登入期限、撤銷及交易規則。
 - `backend/OrganizationEndpoints.cs`、`OrganizationModel.cs`、`OrganizationService.cs` 負責管理路由、部門與管理 DTO，以及設定資格、驗證、版本和交易。
 - `backend/RequisitionDraftEndpoints.cs` 及 `RequisitionDraftContracts.cs` 定義草稿 Minimal API 及 DTO。
 - `backend/RequisitionDraftService.cs` 集中本人草稿查詢、版本和交易。`RequisitionDraftInput.cs` 驗證內容及計算金額，`Requisition.cs` 定義主檔、明細及 EF 對應。
+- `backend/RequisitionApprovalEndpoints.cs` 與 `RequisitionApprovalContracts.cs` 定義簽核和查閱 API 及公開 DTO。
+- `backend/RequisitionApprovalService.cs` 集中查閱授權、資格、版本與關卡轉換。`RequisitionRound.cs` 定義送審快照、歷程及資料庫約束。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
@@ -42,8 +44,10 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | 401 | `invalid_credentials` | 登入帳密不正確，或帳號不可使用 |
 | 401 | `unauthenticated` | 回登入表單；不會回傳 HTML 轉址 |
 | 403 | `forbidden` | 使用符合資格的身分，或先變更臨時密碼 |
-| 404 | `not_found` | 重新讀取設定或本人草稿清單，核對目前可存取的資料 |
-| 409 | `stale_version` | 重新讀取目前身分、設定或草稿，避免覆寫新版本 |
+| 404 | `not_found` | 重新讀取對應清單，核對目前可存取的資料 |
+| 409 | `stale_version` | 重新讀取目前身分或該筆資料，避免使用舊版本 |
+| 409 | `invalid_state` | 重新讀取請購狀態，依目前可用操作處理 |
+| 409 | `reviewers_unavailable` | 請管理員檢查申請人部門、預設審核人或未完成關卡的資格 |
 | 409 | `duplicate_user_name` | 選擇其他帳號名稱 |
 | 423 | `account_locked` | 連續失敗已鎖定，等待解除後由使用者重試 |
 | 429 | `rate_limited` | 同來源登入過密，稍後再由使用者重試 |
@@ -86,6 +90,26 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 
 `isComplete` 表示主旨、用途和 1–100 筆明細的必填內容已填齊。草稿可先保存任一未填齊的內容及可計算小計。讀取時的 `version` 需原樣帶回保存或刪除。過期版本得到 `409 stale_version`，保留目前內容。收到網路錯誤或 `500 server_error` 時，先讀回本人草稿或清單以確認結果，再決定下一步。
 
+## 簽核與分權查閱 API
+
+限啟用中、已完成改密碼要求的業務帳號。GET 可使用有效 Cookie，若帶有 `X-CSRF-TOKEN` 則必須配對當次登入。前端在清單與明細都附上配對權杖。無權查閱及查無請購共用 `404 not_found`。管理帳號在請購 API 回 `403 forbidden`。
+
+| 端點 | 請求本文 | 成功 |
+| --- | --- | --- |
+| `GET /api/requisitions` | 無 | `200`，依更新時間新到舊排列，同時間依識別排序 |
+| `GET /api/requisitions/{id}` | 無 | `200`，可查閱的請購明細及歷程 |
+| `POST /api/requisitions/{id}/submit` | `version` | `200`，保存第一輪並進入主管待審 |
+| `POST /api/requisitions/{id}/approve` | `version` | `200`，主管核准進入財務待審，財務核准後結案 |
+| `POST /api/requisitions/{id}/reject` | `version` | `200`，目前關卡駁回結案 |
+
+清單項目包含 `id`、`number`、`subject`、`applicant`、`status`、`estimatedAmount`、`version`、`createdAt`、`updatedAt`、`paused`、`canDecide` 與 `round`。人員資料含 `id`、`userName`。`round` 含 `number`、`department`（`id`、`name`）、`submittedAt`、`manager`、`finance`，草稿的 `round` 為 `null`。明細及 POST 成功回應另含 `purpose`、`lines`、`isComplete`、`canSubmit`、`history`。歷程每筆含 `roundNumber`、`kind`、`stage`、`actor` 及 `occurredAt`。送審事件的 `kind` 為 `submitted`，`stage` 為 `null`。決定的 `kind` 為 `approved` 或 `rejected`，`stage` 為 `manager` 或 `finance`。
+
+狀態為 `draft`、`manager_pending`、`finance_pending`、`approved` 或 `rejected`。資格阻礙以 `paused` 標示，請購維持原待審狀態。主管待審時兩個尚未完成的關卡都須有合格審核人。主管作成決定後，案件進入財務關時只重查未完成的財務指派。
+
+本人可查閱自己的全部請購。主管可查目前部門已送審的單及本人受指派的單。財務以主管核准事件判斷是否已進財務關，主管駁回的單不因財務角色取得。這些範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
+
+送審時重查本人草稿的內容、申請人部門及兩位預設審核人的資格。送審部門採當次既有歸屬，部門停用保留歷史關聯。舊帳號尚未分配部門時，系統保留草稿，管理員先補上部門才可送審。寫入只接受目前版本，欄位、狀態及指派都由伺服器決定。版本過期、狀態不符或資格不足時保留資料，請依回應讀回最新明細。回應遺失或收到 500 時應先讀回，避免重複提交。
+
 ## 安全及一致性
 
 密碼長度為 12–128 個 .NET UTF-16 字元，不修剪密碼；帳號名稱使用 invariant uppercase 比對。Identity 負責具鹽密碼雜湊，資料庫不保存明文密碼。連續錯誤五次鎖定十五分鐘，成功登入清除失敗次數；鎖定到期的當下可以登入。同直連來源每個一分鐘視窗最多三十次登入嘗試，包含不存在帳號；單體程序重啟會重建來源計數，不信任外來 Forwarded 標頭。
@@ -100,6 +124,8 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 草稿服務鎖定操作者的帳號列，重查當下的登入與業務資格。同一帳號的草稿版本檢查、寫入和撤權依此列鎖的交易提交順序生效。保存會在同一交易取代有順序的明細、更新主檔與該次登入活動時間。交易內任一步失敗都會回滾。刪除主檔時 PostgreSQL 外鍵會同步刪除該草稿明細。
 
+送審及簽核沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓送審與舊版草稿異動不會交錯。第一輪的內容快照、關卡、版本及歷程與狀態在同一筆交易保存，交易失敗會一起回滾。每輪及各關決定有資料庫唯一性約束。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
+
 ## 固定工具鏈與開發
 
 SDK `10.0.403`，ASP.NET Core／Identity／EF `10.0.14`，Npgsql EF provider `10.0.3`，PostgreSQL `18.6`。`global.json` 禁止 SDK roll-forward，NuGet lock files 固定相依；Npgsql 要求 EF `[10.0.4, 11.0.0)`，目前固定版本符合。
@@ -113,3 +139,5 @@ docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests 
 啟動使用 `MigrateAsync` 套用 migration，產生檔由工具管理。`OrganizationManagement` 新增部門與帳號欄位，既有帳號以未分配部門、未設定預設人選、無強制改密碼要求的狀態升級，保留原識別與憑證。降版移除新欄位及部門表會遺失組織設定與強制改密碼狀態，已變更的帳密及角色仍保留。若需回到升級前資料，須使用升級前的資料庫備份與相符的應用版本。
 
 `RequisitionDrafts` 新增 `Requisitions`、`RequisitionLines` 及草稿清單所需索引。既有帳號與設定沿用原有資料。執行此 migration 的降版會移除這兩張表，已保存的草稿需要透過備份才能復原。
+
+簽核遷移新增 `RequisitionRounds` 與 `RequisitionApprovalEvents`，舊草稿沿用原狀態與版本。輪次以 JSONB 保存當次內容與順序，部門與指派保留關聯，部門名稱採送審當時的快照。套用降版會移除輪次及歷程表，且不能把已送審的請購還原成舊版草稿。需回到升級前的狀態時，使用升級前備份及相符的應用版本。

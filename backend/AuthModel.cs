@@ -31,8 +31,10 @@ public sealed class AuthDb(DbContextOptions<AuthDb> options) : IdentityDbContext
     public DbSet<Department> Departments => Set<Department>();
     internal DbSet<Requisition> Requisitions => Set<Requisition>();
     internal DbSet<RequisitionLine> RequisitionLines => Set<RequisitionLine>();
+    internal DbSet<RequisitionRound> RequisitionRounds => Set<RequisitionRound>();
+    internal DbSet<RequisitionApprovalEvent> RequisitionApprovalEvents => Set<RequisitionApprovalEvent>();
 
-    // 在呼叫端交易內串行組織設定與本機初始化，避免跨帳號或部門的資格檢查互相穿插。
+    // 在呼叫端交易內串行組織設定、請購簽核及本機初始化，讓跨帳號資格依提交順序判定。
     internal Task LockOrganization(CancellationToken ct) =>
         Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(80101)", ct);
 

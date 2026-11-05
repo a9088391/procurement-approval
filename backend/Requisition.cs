@@ -6,6 +6,10 @@ namespace Procurement;
 internal sealed class Requisition
 {
     internal const string DraftStatus = "draft";
+    internal const string ManagerPending = "manager_pending";
+    internal const string FinancePending = "finance_pending";
+    internal const string Approved = "approved";
+    internal const string Rejected = "rejected";
     internal const int SubjectLimit = 200;
     internal const int PurposeLimit = 4000;
 
@@ -16,10 +20,18 @@ internal sealed class Requisition
     public string? Subject { get; set; }
     public string? Purpose { get; set; }
     public List<RequisitionLine> Lines { get; set; } = [];
+    public List<RequisitionRound> Rounds { get; set; } = [];
     public decimal? EstimatedAmount { get; set; }
     public string Version { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+
+    // 對齊 PostgreSQL 的微秒精度，讓寫入回應與重新讀取的 UTC 時間一致。
+    internal static DateTimeOffset CurrentTimestamp(TimeProvider clock)
+    {
+        var now = clock.GetUtcNow();
+        return now.AddTicks(-(now.Ticks % 10));
+    }
 
     // 將主檔與明細關聯、精度及清單索引集中，供同一個 DbContext 與 migration 使用。
     internal static void Configure(ModelBuilder builder)
@@ -57,6 +69,9 @@ internal sealed class Requisition
         lines.Property(l => l.ItemName).HasMaxLength(RequisitionLine.ItemNameLimit);
         lines.Property(l => l.Unit).HasMaxLength(RequisitionLine.UnitLimit);
         lines.Property(l => l.UnitPrice).HasPrecision(9, 2);
+
+        // 送審快照與草稿分開保存，舊草稿不會在升級時被視為已送審。
+        RequisitionRound.Configure(builder);
     }
 }
 

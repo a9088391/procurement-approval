@@ -7,6 +7,10 @@ namespace Procurement;
 internal sealed record RequisitionDraftInput(
     string? Subject, string? Purpose, List<RequisitionLine> Lines, decimal? EstimatedAmount)
 {
+    private const int MaxQuantity = 10_000;
+    private const decimal MaxUnitPrice = 1_000_000m;
+    private const decimal MaxTotal = 10_000_000m;
+
     // 將建立與保存的欄位轉成同一種已驗證內容，兩個入口共用金額與輸入規則。
     internal static RequisitionDraftInput? Read(string? subject, string? purpose, DraftLineRequest?[]? requests)
     {
@@ -39,7 +43,7 @@ internal sealed record RequisitionDraftInput(
             if (line.EstimatedAmount is { } amount)
             {
                 total = (total ?? 0m) + amount;
-                if (total > 10_000_000m)
+                if (total > MaxTotal)
                     return null;
             }
             lines.Add(line);
@@ -60,6 +64,19 @@ internal sealed record RequisitionDraftInput(
             && line.Quantity.HasValue
             && line.UnitPrice.HasValue);
 
+    // 送審重查已保存內容與金額，讓輪次只收錄完整且可核對的申請。
+    internal static bool CanSubmit(Requisition draft)
+    {
+        // 驗證必要欄位及每列上下限後才計算總額，避免把無效舊資料帶入歷程。
+        if (!IsComplete(draft) || draft.Lines.Any(line =>
+            line.Quantity is < 1 or > MaxQuantity || line.UnitPrice is <= 0m or > MaxUnitPrice))
+            return false;
+
+        // 草稿數值的精度已由輸入及資料庫欄位限制；總額須符合明細及整單上限。
+        var amount = draft.Lines.Sum(line => line.EstimatedAmount);
+        return amount <= MaxTotal && amount == draft.EstimatedAmount;
+    }
+
     // 拒絕 PostgreSQL 無法保存的 NUL，並使單行欄位可由表單完整讀回。
     private static bool ValidText(string? value, int limit, bool multiline = false) =>
         value is null || (value.Length <= limit
@@ -77,7 +94,7 @@ internal sealed record RequisitionDraftInput(
         // 依固定文化設定解析，確認詞法及數量範圍再交給計算。
         if (raw.ValueKind != JsonValueKind.Number
             || !int.TryParse(raw.GetRawText(), NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-            || value is < 1 or > 10_000)
+            || value is < 1 or > MaxQuantity)
             return false;
 
         quantity = value;
@@ -99,7 +116,7 @@ internal sealed record RequisitionDraftInput(
         var point = text.IndexOf('.');
         if ((point >= 0 && text.Length - point - 1 > 2)
             || !decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value)
-            || value is <= 0m or > 1_000_000m)
+            || value is <= 0m or > MaxUnitPrice)
             return false;
 
         price = value;

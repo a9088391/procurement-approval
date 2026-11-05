@@ -9,6 +9,10 @@ import {
 import { createRoot } from "react-dom/client";
 import { ApiError, readSession, writeAuth, type IdentityDto } from "./api";
 import { Organization } from "./Organization";
+import {
+  RequisitionApprovals,
+  type ApprovalReadback,
+} from "./RequisitionApprovals";
 import { RequisitionDrafts } from "./RequisitionDrafts";
 import "./style.css";
 
@@ -41,6 +45,12 @@ function App() {
     string | null
   >(null);
   const [unknownDraftFor, setUnknownDraftFor] = useState<string | null>(null);
+  // 只跨畫面保留待核對的識別、版本及結果；請購資料本身隨受保護面板卸載。
+  const [approvalContext, setApprovalContext] = useState<{
+    actor: string;
+    active: boolean;
+    readbacks: Record<string, ApprovalReadback>;
+  } | null>(null);
 
   // token 只留在記憶體，不寫入網址或瀏覽器儲存空間。
   const token = useRef("");
@@ -52,8 +62,8 @@ function App() {
   const protectedRecovery = useRef<{ confirmedWrite?: string } | null>(null);
   const actorName = identity?.userName;
 
-  // 草稿送出請求時讀取記憶體權杖，固定回呼讓一般畫面更新不會重啟清單讀取。
-  const getDraftToken = useCallback(() => token.current, []);
+  // 請購請求使用目前身分的記憶體權杖，固定回呼避免重新啟動清單讀取。
+  const getRequisitionToken = useCallback(() => token.current, []);
 
   // 身分與受保護畫面共用閘門，避免登入切換與舊資料讀回交錯。
   const beginOperation = useCallback(() => {
@@ -111,6 +121,44 @@ function App() {
   // 身分流程確定要卸載編輯器時，只留下同帳號可見的未知結果標記。
   function rememberUnknownDraft() {
     if (draftLeave.current.unknown && actorName) setUnknownDraftFor(actorName);
+  }
+
+  // 只有確認切換成其他帳號才捨棄舊標記；匿名或暫時無法查證時仍可由原帳號讀回。
+  function keepApprovalContextFor(confirmed: IdentityDto | null) {
+    if (!confirmed) return;
+    setApprovalContext(
+      // 已確認換人時移除舊帳號的面板選擇和全部待核對標記。
+      (current) => (current?.actor === confirmed.userName ? current : null),
+    );
+  }
+
+  // 切換請購面板前尊重草稿的離開確認，保留同一帳號的未決寫入。
+  function switchBusinessPanel(active: boolean) {
+    // 共用閘門仍由目前的讀寫持有時，不能卸載操作中的面板。
+    if (busy.current || !actorName) return;
+    if (!canLeaveDraft()) return;
+    rememberUnknownDraft();
+    setApprovalContext(
+      // 只有相同帳號的未決操作能跨面板保留。
+      (current) => ({
+        actor: actorName,
+        active,
+        readbacks: current?.actor === actorName ? current.readbacks : {},
+      }),
+    );
+  }
+
+  // 待核對的操作按請購識別保存，避免另一張單的成功回應清除原先的標記。
+  function markApprovalWrite(id: string, readback: ApprovalReadback | null) {
+    setApprovalContext((current) => {
+      // 只更新目前畫面操作者的標記；新帳號即使能讀同一張單也不沿用。
+      if (!current || current.actor !== actorName) return current;
+      if (!readback && !current.readbacks[id]) return current;
+      const readbacks = { ...current.readbacks };
+      if (readback) readbacks[id] = readback;
+      else delete readbacks[id];
+      return { ...current, readbacks };
+    });
   }
 
   // 舊表單被移除時，把鍵盤焦點帶到恢復區，下一次 Tab 可到重讀按鈕。
@@ -171,6 +219,7 @@ function App() {
     // 讀取成功後才顯示對應表單；先前不確定的寫入提示仍由原狀態保留。
     try {
       const session = await readSession();
+      keepApprovalContextFor(session.identity);
       // 身分恢復已完成，撤下舊指引但保留已收到的保存確認。
       if (protectedRecovery.current) {
         const { confirmedWrite } = protectedRecovery.current;
@@ -281,6 +330,7 @@ function App() {
 
       // 重新取得權杖與身分，讓下一個表單對應寫入後的 Cookie 狀態。
       const session = await readSession();
+      keepApprovalContextFor(session.identity);
       // 確認換人後清除前一個帳號的未決提示，避免跨身分出現。
       if (session.identity) {
         setUnknownOrganizationFor(
@@ -329,6 +379,7 @@ function App() {
             // 登入失效時立即試讀目前身分，讓已確認的匿名狀態回到登入表單。
             try {
               const session = await readSession();
+              keepApprovalContextFor(session.identity);
               token.current = session.token;
               setIdentity(session.identity);
               setPhase("ready");
@@ -344,13 +395,17 @@ function App() {
     }
   }
 
+  // 只允許目前身分採用面板選擇；暫時未驗證時不掛載請購資料。
+  const approvalActive =
+    approvalContext?.actor === actorName && approvalContext?.active === true;
+
   // 僅 ready 掛載身分對應的表單；離開 ready 即清除 DOM 中的敏感輸入。
   return (
     <main>
       <header>
         <p className="eyebrow">本機展示</p>
         <h1>請購簽核</h1>
-        <p>登入、請購草稿與組織管理</p>
+        <p>登入、請購草稿、簽核與組織管理</p>
       </header>
       {message || unknownResult ? (
         // 合併一般與未知結果提示；未知結果即使沒有新錯誤仍須以警示呈現。
@@ -511,21 +566,66 @@ function App() {
           ) : null}
           {identity.accountType === "business" &&
           !identity.mustChangePassword ? (
-            // 主管及財務也是業務帳號；此處只掛載本人草稿，不按附加角色分流。
-            <RequisitionDrafts
-              key={identity.userName}
-              getToken={getDraftToken}
-              pending={pending}
-              beginOperation={beginOperation}
-              finishOperation={finishOperation}
-              onSessionInvalid={recoverDraftSession}
-              onLeaveWarningChange={setDraftLeaveWarning}
-              priorUnknown={unknownDraftFor === identity.userName}
-              onUnknownReviewed={
-                // 使用者已核對，目前帳號不再需要保留提示。
-                () => setUnknownDraftFor(null)
-              }
-            />
+            // 所有業務帳號都使用同一組入口；一般查詢依當前權限回傳資料。
+            <>
+              <nav className="requisition-actions" aria-label="請購功能">
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-pressed={!approvalActive}
+                  disabled={pending}
+                  onClick={
+                    // 已在草稿畫面時維持原表單及焦點。
+                    () => {
+                      if (approvalActive) switchBusinessPanel(false);
+                    }
+                  }
+                >
+                  本人請購草稿
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-pressed={approvalActive}
+                  disabled={pending}
+                  onClick={
+                    // 切換前讓原草稿畫面處理離開確認。
+                    () => {
+                      if (!approvalActive) switchBusinessPanel(true);
+                    }
+                  }
+                >
+                  請購查閱與簽核
+                </button>
+              </nav>
+              {approvalActive && approvalContext ? (
+                <RequisitionApprovals
+                  key={identity.userName}
+                  getToken={getRequisitionToken}
+                  pending={pending}
+                  beginOperation={beginOperation}
+                  finishOperation={finishOperation}
+                  onSessionInvalid={recoverProtectedSession}
+                  readbacks={approvalContext.readbacks}
+                  onReadbackChange={markApprovalWrite}
+                />
+              ) : (
+                <RequisitionDrafts
+                  key={identity.userName}
+                  getToken={getRequisitionToken}
+                  pending={pending}
+                  beginOperation={beginOperation}
+                  finishOperation={finishOperation}
+                  onSessionInvalid={recoverDraftSession}
+                  onLeaveWarningChange={setDraftLeaveWarning}
+                  priorUnknown={unknownDraftFor === identity.userName}
+                  onUnknownReviewed={
+                    // 使用者已核對，目前帳號不再需要保留提示。
+                    () => setUnknownDraftFor(null)
+                  }
+                />
+              )}
+            </>
           ) : null}
         </>
       ) : null}
