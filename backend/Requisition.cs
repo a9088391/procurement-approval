@@ -2,10 +2,11 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Procurement;
 
-// 請購主檔保留系統識別、所有人與狀態；草稿階段的時間只代表建立及保存。
+// 請購主檔保留固定識別、所有人、目前狀態及可編輯內容；送審歷史另存輪次。
 internal sealed class Requisition
 {
     internal const string DraftStatus = "draft";
+    internal const string Withdrawn = "withdrawn";
     internal const string ManagerPending = "manager_pending";
     internal const string FinancePending = "finance_pending";
     internal const string Approved = "approved";

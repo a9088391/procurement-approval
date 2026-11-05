@@ -72,19 +72,19 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 
 部門名稱修剪首尾空白後須為 1–100 個 UTF-16 字元。新帳號名稱同樣修剪首尾空白，須為 1–64 個 UTF-16 字元，重複名稱以不分大小寫判斷。部門名稱、新帳號名稱、臨時密碼及強制改密碼的新密碼都必須能由單行表單輸入，任何位置含 CR 或 LF 均回 `400 invalid_input`。密碼長度 12–128 個 UTF-16 字元，首尾空白會保留。新業務帳號具申請人角色，主管與財務可兼任。重設時需使用不同於現有密碼的臨時密碼。新分配部門須為啟用狀態，原有歸屬可保留。新選的預設審核人須啟用、有對應角色，且申請人和兩位審核人各自不同。停用或撤權保留指向該人選的設定，管理員可查閱並替換。
 
-## 本人草稿 API
+## 本人可編輯請購 API
 
 限啟用中的業務帳號使用。所有讀寫皆需有效登入，`POST` 另須帶同源防偽權杖。草稿 GET 可只用 Cookie，也可附上 `X-CSRF-TOKEN` 供伺服器確認本次 Cookie 與讀取端身分一致。草稿畫面會附上此標頭，權杖失配回 `400 invalid_csrf`。管理帳號沒有草稿權限，失效登入得到 `401 unauthenticated`。他人草稿和不存在的草稿同樣回 `404 not_found`。
 
 | 端點 | 請求本文 | 成功 |
 | --- | --- | --- |
-| `GET /api/requisitions/drafts` | 無 | `200`，本人草稿摘要，依更新時間新到舊排列，時間相同時依識別排序 |
+| `GET /api/requisitions/drafts` | 無 | `200`，本人草稿及撤回修改中的摘要，依更新時間新到舊排列，時間相同時依識別排序 |
 | `POST /api/requisitions/drafts` | `subject`、`purpose`、`lines` 可省略或為 `null` | `201`，保存後的草稿 |
-| `GET /api/requisitions/drafts/{id}` | 無 | `200`，目前草稿 |
-| `POST /api/requisitions/drafts/{id}` | `version`、`subject`、`purpose`、`lines`，須明確提供可編輯欄位，可用 `null` 清除 | `200`，保存後的草稿 |
-| `POST /api/requisitions/drafts/{id}/delete` | `version` | `204` |
+| `GET /api/requisitions/drafts/{id}` | 無 | `200`，目前可編輯內容 |
+| `POST /api/requisitions/drafts/{id}` | `version`、`subject`、`purpose`、`lines`，須明確提供可編輯欄位，可用 `null` 清除 | `200`，保存後的可編輯內容 |
+| `POST /api/requisitions/drafts/{id}/delete` | `version` | `204`，只限本人從未送審的草稿 |
 
-摘要包含 `id`、`number`、`subject`、`updatedAt`。草稿另回傳 `applicantId`、`status`（`draft`）、`purpose`、`lines`、`estimatedAmount`、`isComplete`、`version` 和 `createdAt`。識別、單號、申請人、時間、狀態、版本及計算金額由伺服器決定。部門與送審時間會由送審操作決定。輸入未宣告的欄位會回 `400 invalid_input`。
+摘要包含 `id`、`number`、`subject`、`updatedAt`。單筆另回傳 `applicantId`、`status`（`draft` 或 `withdrawn`）、`purpose`、`lines`、`estimatedAmount`、`isComplete`、`version` 和 `createdAt`。識別、單號、申請人、時間、狀態、版本及計算金額由伺服器決定。部門與送審時間會由送審操作決定。輸入未宣告的欄位會回 `400 invalid_input`。
 
 每筆明細接受 `itemName`、`unit`、`quantity`、`unitPrice`，可省略或為 `null`。主旨及品名最多 200、用途最多 4,000、單位最多 40 個 UTF-16 字元。主旨、品名及單位是單行欄位，所有文字禁止 NUL。數量為 1–10,000 的 JSON 整數。單價為大於零、至多 1,000,000 的 JSON 十進位數值，最多兩位小數。數值採一般十進位寫法，拒絕引號、指數記法及超精度。每列及整單以精確十進位計算 TWD，已能計算的金額合計不得超過 10,000,000。完全無法計算時回傳 `null`。明細回應另包含該列 `estimatedAmount`。
 
@@ -98,17 +98,22 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | --- | --- | --- |
 | `GET /api/requisitions` | 無 | `200`，依更新時間新到舊排列，同時間依識別排序 |
 | `GET /api/requisitions/{id}` | 無 | `200`，可查閱的請購明細及歷程 |
-| `POST /api/requisitions/{id}/submit` | `version` | `200`，保存第一輪並進入主管待審 |
+| `POST /api/requisitions/{id}/submit` | `version` | `200`，保存新一輪並進入主管待審 |
+| `POST /api/requisitions/{id}/withdraw` | `version` | `200`，本人於首次決定前撤回，回到可編輯狀態 |
 | `POST /api/requisitions/{id}/approve` | `version` | `200`，主管核准進入財務待審，財務核准後結案 |
 | `POST /api/requisitions/{id}/reject` | `version` | `200`，目前關卡駁回結案 |
 
-清單項目包含 `id`、`number`、`subject`、`applicant`、`status`、`estimatedAmount`、`version`、`createdAt`、`updatedAt`、`paused`、`canDecide` 與 `round`。人員資料含 `id`、`userName`。`round` 含 `number`、`department`（`id`、`name`）、`submittedAt`、`manager`、`finance`，草稿的 `round` 為 `null`。明細及 POST 成功回應另含 `purpose`、`lines`、`isComplete`、`canSubmit`、`history`。歷程每筆含 `roundNumber`、`kind`、`stage`、`actor` 及 `occurredAt`。送審事件的 `kind` 為 `submitted`，`stage` 為 `null`。決定的 `kind` 為 `approved` 或 `rejected`，`stage` 為 `manager` 或 `finance`。
+清單項目包含 `id`、`number`、`subject`、`applicant`、`status`、`estimatedAmount`、`version`、`createdAt`、`updatedAt`、`paused`、`canDecide` 與 `round`。人員資料含 `id`、`userName`。`round` 含 `number`、`department`（`id`、`name`）、`submittedAt`、`manager`、`finance`，表示最近一次送審。從未送審時為 `null`。
 
-狀態為 `draft`、`manager_pending`、`finance_pending`、`approved` 或 `rejected`。資格阻礙以 `paused` 標示，請購維持原待審狀態。主管待審時兩個尚未完成的關卡都須有合格審核人。主管作成決定後，案件進入財務關時只重查未完成的財務指派。
+明細及 POST 成功回應另含 `purpose`、`lines`、`isComplete`、`canSubmit`、`canWithdraw`、`history` 與 `previousRounds`。撤回修改期間，頂層欄位呈現目前保存的可編輯內容。`previousRounds` 每筆含 `round`、`subject`、`purpose`、`estimatedAmount` 及 `lines`。申請人會在這裡取得先前快照，撤回修改期間也包含剛撤回的一輪。其他帳號取得空陣列。
 
-本人可查閱自己的全部請購。主管可查目前部門已送審的單及本人受指派的單。財務以主管核准事件判斷是否已進財務關，主管駁回的單不因財務角色取得。這些範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
+歷程每筆含 `roundNumber`、`kind`、`stage`、`actor` 及 `occurredAt`。送審和撤回事件的 `kind` 分別為 `submitted` 和 `withdrawn`，`stage` 為 `null`。決定的 `kind` 為 `approved` 或 `rejected`，`stage` 為 `manager` 或 `finance`。
 
-送審時重查本人草稿的內容、申請人部門及兩位預設審核人的資格。送審部門採當次既有歸屬，部門停用保留歷史關聯。舊帳號尚未分配部門時，系統保留草稿，管理員先補上部門才可送審。寫入只接受目前版本，欄位、狀態及指派都由伺服器決定。版本過期、狀態不符或資格不足時保留資料，請依回應讀回最新明細。回應遺失或收到 500 時應先讀回，避免重複提交。
+狀態為 `draft`、`withdrawn`、`manager_pending`、`finance_pending`、`approved` 或 `rejected`。資格阻礙以 `paused` 標示，請購維持原待審狀態。主管待審時兩個尚未完成的關卡都須有合格審核人。主管作成決定後，案件進入財務關時只重查未完成的財務指派。暫停不改變首次決定前可撤回的條件。
+
+本人可查閱自己的全部請購。只有本人可查草稿與撤回修改中的單，也只有本人可查舊輪次。主管可查目前部門審核中或已結案的單及最新一輪指派給本人的單。財務以最新一輪的主管核准事件判斷是否已進財務關。角色範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。其他業務帳號獲准時只會取得最新一輪的資料與歷程。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
+
+送審和重送都重新驗證本人已保存的可編輯內容、申請人部門及兩位預設審核人的資格。送審部門採當次既有歸屬，部門停用保留歷史關聯。舊帳號尚未分配部門時，系統保留目前內容，管理員先補上部門才可送審。寫入只接受目前版本，欄位、狀態及指派都由伺服器決定。版本過期、狀態不符或資格不足時保留資料，請依回應讀回最新明細。回應遺失或收到 500 時應先讀回，避免重複提交。
 
 ## 安全及一致性
 
@@ -124,7 +129,7 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 草稿服務鎖定操作者的帳號列，重查當下的登入與業務資格。同一帳號的草稿版本檢查、寫入和撤權依此列鎖的交易提交順序生效。保存會在同一交易取代有順序的明細、更新主檔與該次登入活動時間。交易內任一步失敗都會回滾。刪除主檔時 PostgreSQL 外鍵會同步刪除該草稿明細。
 
-送審及簽核沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓送審與舊版草稿異動不會交錯。第一輪的內容快照、關卡、版本及歷程與狀態在同一筆交易保存，交易失敗會一起回滾。每輪及各關決定有資料庫唯一性約束。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
+送審、撤回及簽核沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓撤回、保存與重送依序生效。撤回與首關決定競爭時，先提交的結果會使落後操作的版本、狀態或可見範圍失效。每次寫入在同一筆交易保存狀態、版本及歷程，送審時同時保存新快照。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
 
 ## 固定工具鏈與開發
 
@@ -141,3 +146,5 @@ docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests 
 `RequisitionDrafts` 新增 `Requisitions`、`RequisitionLines` 及草稿清單所需索引。既有帳號與設定沿用原有資料。執行此 migration 的降版會移除這兩張表，已保存的草稿需要透過備份才能復原。
 
 簽核遷移新增 `RequisitionRounds` 與 `RequisitionApprovalEvents`，舊草稿沿用原狀態與版本。輪次以 JSONB 保存當次內容與順序，部門與指派保留關聯，部門名稱採送審當時的快照。套用降版會移除輪次及歷程表，且不能把已送審的請購還原成舊版草稿。需回到升級前的狀態時，使用升級前備份及相符的應用版本。
+
+撤回遷移調整操作歷程的種類及唯一性約束，保留既有草稿、輪次及事件。資料庫限制每輪最多一筆送審、一筆撤回，以及每個審核關卡最多一筆決定。已有撤回歷程時，舊版約束無法接納現有資料。要回到升級前的資料狀態，須使用升級前的備份和相符的應用版本。

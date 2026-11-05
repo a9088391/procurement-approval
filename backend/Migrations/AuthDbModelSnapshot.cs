@@ -381,14 +381,16 @@ namespace Procurement.Api.Migrations
 
                     b.HasIndex("ActorId");
 
+                    b.HasIndex("RequisitionId", "RoundNumber", "Kind")
+                        .IsUnique()
+                        .HasFilter(" \"Stage\" IS NULL ");
+
                     b.HasIndex("RequisitionId", "RoundNumber", "Stage")
                         .IsUnique();
 
-                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("RequisitionId", "RoundNumber", "Stage"), false);
-
                     b.ToTable("RequisitionApprovalEvents", null, t =>
                         {
-                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_KindStage", "(\"Kind\" = 'submitted' AND \"Stage\" IS NULL) OR\n(\"Kind\" IN ('approved', 'rejected') AND \"Stage\" IS NOT NULL AND \"Stage\" IN ('manager', 'finance'))");
+                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_KindStage", "(\"Kind\" IN ('submitted', 'withdrawn') AND \"Stage\" IS NULL) OR\n(\"Kind\" IN ('approved', 'rejected') AND \"Stage\" IS NOT NULL AND \"Stage\" IN ('manager', 'finance'))");
                         });
                 });
 

@@ -28,7 +28,7 @@ docker compose -p procurement-approval stop
 docker compose -p procurement-approval up -d
 ```
 
-帳號、密碼雜湊、登入紀錄、部門、預設審核人、草稿、簽核輪次及歷程保存在專案的 `database` named volume，Cookie 防護金鑰保存在 `.local/keys/`。保留兩者，重啟後可繼續使用原設定與有效登入，並重新開啟已保存的草稿、送審快照及決定。`.local/` 含本機敏感資料，已排除於 Git 和 Docker build context。金鑰存取由目錄權限限制。
+帳號、密碼雜湊、登入紀錄、部門、預設審核人、草稿、簽核輪次及歷程保存在專案的 `database` named volume，Cookie 防護金鑰保存在 `.local/keys/`。保留兩者，重啟後可繼續使用原設定與有效登入，並重新開啟已保存的草稿、撤回後保存的修改、各輪快照及決定。`.local/` 含本機敏感資料，已排除於 Git 和 Docker build context。金鑰存取由目錄權限限制。
 
 `docker compose down` 會移除本專案容器與網路，預設保留資料 volume；不要加 `--volumes`。刪除 volume 會失去帳號與資料，刪除 `.local/keys/` 會使現有 Cookie 無法解密。這些刪除不是復原方式；目前沒有備份／復原工具，資料遺失無法靠退回程式修復。
 

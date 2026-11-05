@@ -515,6 +515,12 @@ export function RequisitionDrafts({
             {editor.draft ? `編輯草稿 ${editor.draft.number}` : "新請購草稿"}
           </h3>
           <p className="hint">草稿可以留空。金額只涵蓋可計算的明細。</p>
+          {editor.draft?.status === "withdrawn" ? (
+            <p className="hint">
+              此單正在撤回修改中。保存後回到「請購查閱與簽核」使用「送出簽核」重送；單號{" "}
+              {editor.draft.number} 保持不變。
+            </p>
+          ) : null}
           <fieldset disabled={fieldsLocked}>
             <RequisitionDraftFields
               form={editor.form}
@@ -531,7 +537,7 @@ export function RequisitionDrafts({
             </p>
             <div className="draft-actions">
               <button type="submit">保存草稿</button>
-              {editor.draft ? (
+              {editor.draft?.status === "draft" ? (
                 <button
                   className="secondary"
                   type="button"

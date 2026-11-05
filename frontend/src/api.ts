@@ -102,7 +102,7 @@ export interface DraftInputDto {
 // 詳情與保存回應的金額、完整性和版本都由後端決定。
 export interface DraftDto extends DraftSummaryDto {
   applicantId: string;
-  status: "draft";
+  status: "draft" | "withdrawn";
   purpose: string | null;
   lines: (DraftLineInputDto & { estimatedAmount: number | null })[];
   estimatedAmount: number | null;
@@ -117,7 +117,12 @@ type RequisitionPerson = { id: string; userName: string };
 export interface RequisitionSummaryDto extends DraftSummaryDto {
   applicant: RequisitionPerson;
   status:
-    "draft" | "manager_pending" | "finance_pending" | "approved" | "rejected";
+    | "draft"
+    | "withdrawn"
+    | "manager_pending"
+    | "finance_pending"
+    | "approved"
+    | "rejected";
   estimatedAmount: number | null;
   version: string;
   createdAt: string;
@@ -138,16 +143,27 @@ export interface RequisitionDetailDto extends RequisitionSummaryDto {
   lines: DraftDto["lines"];
   isComplete: boolean;
   canSubmit: boolean;
+  canWithdraw: boolean;
+  previousRounds: RequisitionRoundSnapshotDto[];
   history: {
     roundNumber: number;
-    kind: "submitted" | "approved" | "rejected";
+    kind: "submitted" | "withdrawn" | "approved" | "rejected";
     stage: "manager" | "finance" | null;
     actor: RequisitionPerson;
     occurredAt: string;
   }[];
 }
 
-export type ApprovalAction = "submit" | "approve" | "reject";
+// 只供申請人查閱的既有送審輪次，沿用明細的輪次與明細 DTO。
+export interface RequisitionRoundSnapshotDto {
+  round: NonNullable<RequisitionSummaryDto["round"]>;
+  subject: string | null;
+  purpose: string | null;
+  estimatedAmount: number | null;
+  lines: DraftDto["lines"];
+}
+
+export type ApprovalAction = "submit" | "withdraw" | "approve" | "reject";
 
 // 防偽端點回應只供本次頁面的後續寫入使用。
 interface CsrfResponseDto {
@@ -353,6 +369,7 @@ export async function writeApproval(
 
 const requisitionStatuses = new Set<unknown>([
   "draft",
+  "withdrawn",
   "manager_pending",
   "finance_pending",
   "approved",
@@ -434,17 +451,30 @@ function isRequisitionLine(value: unknown) {
   );
 }
 
-// 送審沒有審核關卡；有審核決定時必須能辨識主管或財務。
+// 送審和撤回沒有審核關卡；有審核決定時必須能辨識主管或財務。
 function isRequisitionHistoryEntry(value: unknown) {
   return (
     isRecord(value) &&
     isRoundNumber(value.roundNumber) &&
     isRequisitionPerson(value.actor) &&
     isTimestamp(value.occurredAt) &&
-    (value.kind === "submitted"
+    (value.kind === "submitted" || value.kind === "withdrawn"
       ? value.stage === null
       : (value.kind === "approved" || value.kind === "rejected") &&
         (value.stage === "manager" || value.stage === "finance"))
+  );
+}
+
+// 舊輪次需完整驗證當時內容，且不正規化部門名稱等原始顯示字串。
+function isRequisitionRoundSnapshot(value: unknown) {
+  return (
+    isRecord(value) &&
+    isRequisitionRound(value.round) &&
+    isNullableText(value.subject) &&
+    isNullableText(value.purpose) &&
+    isNullableNumber(value.estimatedAmount) &&
+    Array.isArray(value.lines) &&
+    value.lines.every(isRequisitionLine)
   );
 }
 
@@ -467,6 +497,7 @@ function isRequisitionDetail(
     isTimestamp(value.updatedAt) &&
     typeof value.paused === "boolean" &&
     typeof value.canDecide === "boolean" &&
+    typeof value.canWithdraw === "boolean" &&
     typeof value.isComplete === "boolean" &&
     typeof value.canSubmit === "boolean" &&
     (value.status === "draft"
@@ -474,6 +505,8 @@ function isRequisitionDetail(
       : isRequisitionRound(value.round)) &&
     Array.isArray(value.lines) &&
     value.lines.every(isRequisitionLine) &&
+    Array.isArray(value.previousRounds) &&
+    value.previousRounds.every(isRequisitionRoundSnapshot) &&
     Array.isArray(value.history) &&
     value.history.every(isRequisitionHistoryEntry)
   );

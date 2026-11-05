@@ -131,12 +131,14 @@ public sealed class RequisitionApprovalAuthorizationTests
         foreach (var path in paths)
             await Expect(await browser.GetAsync(path), HttpStatusCode.BadRequest, "invalid_csrf");
         await Expect(await Post(browser, draft, "submit"), HttpStatusCode.BadRequest, "invalid_csrf");
+        await Expect(await Post(browser, draft, "withdraw"), HttpStatusCode.BadRequest, "invalid_csrf");
 
-        // 只用 Cookie 時讀回相同內容，但沒有權杖仍不可送審。
+        // 只用 Cookie 時讀回相同內容，但沒有權杖仍不可送審或撤回。
         browser.DefaultRequestHeaders.Remove(header);
         for (var i = 0; i < paths.Length; i++)
             Assert.True(JsonElement.DeepEquals(matched[i], await browser.GetFromJsonAsync<JsonElement>(paths[i])));
         await Expect(await Post(browser, draft, "submit"), HttpStatusCode.BadRequest, "invalid_csrf");
+        await Expect(await Post(browser, draft, "withdraw"), HttpStatusCode.BadRequest, "invalid_csrf");
         AssertStatus(await Detail(scenario.Owner.Client, draft), "draft", false, false);
     }
 
@@ -209,9 +211,9 @@ public sealed class RequisitionApprovalAuthorizationTests
     // 已存在但越權和不存在的單須有相同的完整錯誤，避免知道識別就能枚舉。
     private static async Task AssertInvisible(HttpClient client, JsonElement hidden)
     {
-        // 讀取及三個寫入都帶可通過本文驗證的格式，核對相同狀態、代碼及訊息。
+        // 讀取及所有寫入都帶可通過本文驗證的格式，核對相同狀態、代碼及訊息。
         var version = new { version = VersionOf(hidden) };
-        foreach (var action in new[] { "", "/submit", "/approve", "/reject" })
+        foreach (var action in new[] { "", "/submit", "/withdraw", "/approve", "/reject" })
         {
             var target = ApprovalPath(hidden) + action;
             var missing = $"{RequisitionsPath}/{Guid.NewGuid()}{action}";
@@ -230,7 +232,7 @@ public sealed class RequisitionApprovalAuthorizationTests
     {
         await Expect(await client.GetAsync(RequisitionsPath), status, code);
         await Expect(await client.GetAsync(ApprovalPath(draft)), status, code);
-        foreach (var action in new[] { "submit", "approve", "reject" })
+        foreach (var action in new[] { "submit", "withdraw", "approve", "reject" })
             await Expect(await Post(client, draft, action), status, code);
     }
 }

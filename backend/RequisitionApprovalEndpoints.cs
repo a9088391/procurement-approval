@@ -17,6 +17,9 @@ internal static class RequisitionApprovalEndpoints
         requisitions.MapPost("/{id}/submit", (
             string id, ApprovalRequest request, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
             service.Submit(id, request, http.User, ct));
+        requisitions.MapPost("/{id}/withdraw", (
+            string id, ApprovalRequest request, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
+            service.Withdraw(id, request, http.User, ct));
         requisitions.MapPost("/{id}/approve", (
             string id, ApprovalRequest request, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
             service.Decide(id, request, http.User, approve: true, ct));

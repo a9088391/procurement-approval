@@ -1,5 +1,22 @@
 # 測試與驗證
 
+## 撤回與重送實測
+
+2026-11-05 在 macOS ARM64、Compose 5.5.0 和隔離 PostgreSQL 18.6 執行 Release HTTP 整合套件，**164／164 通過**。撤回與主管決定分別先進入 PostgreSQL 等鎖佇列，兩種順序都只留下單一合法結果。另驗證撤回與重送提交失敗的回滾、停用先完成時拒絕撤回、舊輪次分權及多輪快照。Release 建置零警告及錯誤，鎖定還原、兩個 .NET 專案格式及 EF 模型一致性皆通過。
+
+Chromium 簽核套件在同一隔離資料卷分批執行兩輪，各 **7／7 通過**。新案例實際提交撤回後中斷回應，手動讀回再保存及重送同一單號。申請人可展開第一輪，主管只見最新輪。展開的明細通過 390／1280 px 的長字串斷行及控制項檢查。另執行登入與組織 **14／14**、草稿 **6／6**，TypeScript、Vite 及 Prettier 皆通過。各瀏覽器批次前重啟隔離 app，避免累積觸發既有登入節流。
+
+2026-11-06 另以真實 HTTP 安排撤回先提交，定向中斷較晚核准的回應。分別驗證仍撤回與已重送兩種讀回。畫面會說明舊操作結果無法確認，保留其他請購的核對入口，並依資格提供新一輪的操作。修正後簽核套件 **9／9**，獨立重跑新增兩項 **2／2**，完整 Release HTTP 仍為 **164／164**。
+
+隔離 Compose 網站從已有固定兩關簽核資料的版本原地升級。升級前後的 152 筆請購、127 筆明細、89 輪快照及 172 筆事件，整列內容校驗一致。建立含撤回與重送的資料後，再執行 `initialize-demo` 並停啟 app 與 PostgreSQL，四張請購資料表的內容校驗一致。原登入與新登入也經 HTTP 讀回相同的既有明細。
+
+### 手動驗證
+
+1. 依 [操作步驟](../README.md#送審與兩關簽核) 設定部門及人選。由申請人保存一筆完整請購並送審，記下單號。主管在第一次決定前可讀取該單。
+2. 由申請人開啟該單並撤回。確認狀態變為撤回修改中且歷程新增撤回紀錄。重新讀取主管的列表，該單應消失。由申請人從「本人請購草稿」重開原單，修改主旨及明細並保存。編輯畫面沒有刪除按鈕。
+3. 在組織管理為申請人更換部門及預設人選。由申請人重送同一單號，確認從新輪次的主管待審開始。申請人可展開舊快照核對原內容、送審部門及人選；符合查閱資格的主管及財務只取得最新一輪。財務要等新一輪主管核准才取得該輪的財務查閱權。
+4. 由新一輪主管作出決定，再由申請人讀回，確認撤回入口已消失。若畫面提示寫入結果未確認，使用「重新讀取結果」核對狀態及歷程後再決定下一步。
+
 ## 固定兩關簽核實測
 
 2026-11-05 在 macOS ARM64、Compose 5.5.0 和隔離 PostgreSQL 18.6 執行 Release HTTP 整合套件，**155／155 通過**，包含 39 個新簽核案例。Release 建置零警告及錯誤。鎖定還原、兩個 .NET 專案格式、EF 模型一致性與固定 Node 容器的 TypeScript、Vite、Prettier 檢查均通過。
@@ -71,11 +88,12 @@ docker compose -p procurement-approval-test -f compose.test.yaml down
 - `RequisitionApprovalTests`、`RequisitionApprovalAuthorizationTests` 及 `RequisitionApprovalValidationTests` 從 HTTP 驗證送審欄位、金額、部門與人選快照、核准及駁回、依當前角色與部門查閱、舊登入和過期資料拒絕。測試以既有管理 API 設定資格並核對實際清單、明細與歷程。
 - `RequisitionApprovalTransactionTests` 觀察兩筆請求實際等待 PostgreSQL 交易鎖，再核對重複及相反決定。另用管理 API 先提交撤權，以隔離資料庫的延後觸發器使提交故障，驗證原關卡、快照、版本及歷程的一致性。`RequisitionApprovalMigrationTests` 在隔離 schema 比對升級前後的舊草稿及明細。
 
-只重跑本人草稿或簽核的 HTTP 驗證時，使用 Release 測試篩選。
+只重跑本人草稿、簽核或撤回重送的 HTTP 驗證時，使用 Release 測試篩選。撤回的競爭、交易回滾及遷移案例由簽核篩選涵蓋。
 
 ```sh
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionDraft
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionApproval
+docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionWithdrawal
 ```
 
 WAF 只以 DI 取代 `TimeProvider` 及測試交易攔截器，正式程式沒有調時間或注入故障的 API。時間案例直接推進測試時鐘，不等待十五分鐘或八小時；競爭案例以 PostgreSQL 等待狀態或交易屏障確定真正重疊，不用任意延遲假裝競爭。

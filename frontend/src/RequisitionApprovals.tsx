@@ -7,6 +7,7 @@ import {
   writeApproval,
   type ApprovalAction,
   type RequisitionDetailDto,
+  type RequisitionRoundSnapshotDto,
   type RequisitionSummaryDto,
 } from "./api";
 import { formatDraftAmount } from "./RequisitionDraftForm";
@@ -21,21 +22,28 @@ interface Props {
   onReadbackChange: (id: string, readback: ApprovalReadback | null) => void;
 }
 
-// 待核對資料只含請求版本與已確認的動作，可由同帳號跨畫面恢復。
+// 同帳號可跨畫面核對原請求版本、當時輪次與已確認的動作。
 export interface ApprovalReadback {
   version: string;
+  roundNumber?: number;
   confirmed?: ApprovalAction;
 }
 
 const statusNames = {
   draft: "草稿",
+  withdrawn: "撤回修改中",
   manager_pending: "主管待審",
   finance_pending: "財務待審",
   approved: "核准結案",
   rejected: "駁回結案",
 };
 
-const actionNames = { submit: "送出簽核", approve: "核准", reject: "駁回" };
+const actionNames = {
+  submit: "送出簽核",
+  withdraw: "撤回修改",
+  approve: "核准",
+  reject: "駁回",
+};
 const dateFormat = new Intl.DateTimeFormat("zh-TW", {
   dateStyle: "medium",
   timeStyle: "short",
@@ -74,58 +82,39 @@ function RequisitionTime({ value }: { value: string }) {
   return <time dateTime={value}>{dateFormat.format(new Date(value))}</time>;
 }
 
-// 純顯示已保存的內容與人員，不從目前帳號設定重建輪次或推導審核資格。
-function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
-  const { round, history } = detail;
-
-  // 已送審資料有獨立快照；草稿尚未建立部門、人選及歷程。
+// 目前輪與歷史輪共用同一組後端快照欄位，避免顯示語意分岔。
+function RequisitionRoundFields({
+  round,
+}: {
+  round: NonNullable<RequisitionSummaryDto["round"]>;
+}) {
   return (
     <>
-      <dl>
-        <dt>主旨</dt>
-        <dd>{detail.subject || "未填主旨"}</dd>
-        <dt>整單用途</dt>
-        <dd className="requisition-purpose">{detail.purpose || "未填用途"}</dd>
-        <dt>申請人</dt>
-        <dd>{detail.applicant.userName}</dd>
-        <dt>目前狀態</dt>
-        <dd>{statusNames[detail.status]}</dd>
-        <dt>預估申請金額</dt>
-        <dd>{formatDraftAmount(detail.estimatedAmount)}</dd>
-        {round ? (
-          <>
-            <dt>送審輪次</dt>
-            <dd>第 {round.number} 輪</dd>
-            <dt>送審部門</dt>
-            <dd>{round.department.name}</dd>
-            <dt>送審時間</dt>
-            <dd>
-              <RequisitionTime value={round.submittedAt} />
-            </dd>
-            <dt>主管審核者</dt>
-            <dd>{round.manager.userName}</dd>
-            <dt>財務審核者</dt>
-            <dd>{round.finance.userName}</dd>
-          </>
-        ) : null}
-      </dl>
-      {detail.paused ? (
-        <p className="feedback error" role="alert">
-          簽核已暫停，保留目前關卡。請聯絡管理員確認尚未完成關卡的審核人資格。
-        </p>
-      ) : null}
-      {detail.status === "draft" && !detail.canSubmit ? (
-        <p className="hint">
-          {detail.isComplete
-            ? "目前無法送審。請管理員確認申請人的部門及預設審核人設定。"
-            : "請先在本人請購草稿填妥主旨、用途與 1–100 筆有效明細並保存。"}
-        </p>
-      ) : null}
+      <dt>送審輪次</dt>
+      <dd>第 {round.number} 輪</dd>
+      <dt>送審部門</dt>
+      <dd>{round.department.name}</dd>
+      <dt>送審時間</dt>
+      <dd>
+        <RequisitionTime value={round.submittedAt} />
+      </dd>
+      <dt>主管審核者</dt>
+      <dd>{round.manager.userName}</dd>
+      <dt>財務審核者</dt>
+      <dd>{round.finance.userName}</dd>
+    </>
+  );
+}
+
+// 依伺服器順序顯示已保存明細，不重新計算金額或改排品項。
+function RequisitionLines({ lines }: { lines: RequisitionDetailDto["lines"] }) {
+  return (
+    <>
       <h4>請購明細</h4>
-      {detail.lines.length ? (
+      {lines.length ? (
         <ol>
-          {detail.lines.map(
-            // 已保存明細不會就地編輯或重排，依其快照順序顯示。
+          {lines.map(
+            // 明細保留 API 的順序，以索引識別同一份已讀取快照中的位置。
             (line, index) => (
               <li key={index} className="draft-line">
                 <dl>
@@ -147,17 +136,107 @@ function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
       ) : (
         <p className="hint">目前沒有明細。</p>
       )}
+    </>
+  );
+}
+
+// 完整顯示一輪送審時的內容、人選與部門，不受目前設定變更影響。
+function RequisitionRoundSnapshot({
+  snapshot,
+}: {
+  snapshot: RequisitionRoundSnapshotDto;
+}) {
+  const { round } = snapshot;
+
+  // 部門文字採 API 原值呈現，保留歷史快照中合法的特殊字元。
+  return (
+    <>
+      <dl>
+        <dt>主旨</dt>
+        <dd>{snapshot.subject || "未填主旨"}</dd>
+        <dt>整單用途</dt>
+        <dd className="requisition-purpose">
+          {snapshot.purpose || "未填用途"}
+        </dd>
+        <RequisitionRoundFields round={round} />
+        <dt>預估申請金額</dt>
+        <dd>{formatDraftAmount(snapshot.estimatedAmount)}</dd>
+      </dl>
+      <RequisitionLines lines={snapshot.lines} />
+    </>
+  );
+}
+
+// 純顯示 API 已授權的目前內容與輪次，不從設定重建資格或歷史資料。
+function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
+  const { round, history } = detail;
+
+  // 撤回期間的頂層內容已可編輯，歷史送審版本改由獨立區塊呈現。
+  return (
+    <>
+      <dl>
+        <dt>主旨</dt>
+        <dd>{detail.subject || "未填主旨"}</dd>
+        <dt>整單用途</dt>
+        <dd className="requisition-purpose">{detail.purpose || "未填用途"}</dd>
+        <dt>申請人</dt>
+        <dd>{detail.applicant.userName}</dd>
+        <dt>目前狀態</dt>
+        <dd>{statusNames[detail.status]}</dd>
+        <dt>預估申請金額</dt>
+        <dd>{formatDraftAmount(detail.estimatedAmount)}</dd>
+        {round && detail.status !== "withdrawn" ? (
+          <RequisitionRoundFields round={round} />
+        ) : null}
+      </dl>
+      {detail.status === "withdrawn" ? (
+        <p className="hint">
+          請至「本人請購草稿」開啟單號 {detail.number}{" "}
+          編輯並保存，再回到「請購查閱與簽核」使用「送出簽核」重送。
+        </p>
+      ) : null}
+      {detail.paused ? (
+        <p className="feedback error" role="alert">
+          簽核已暫停，保留目前關卡。請聯絡管理員確認尚未完成關卡的審核人資格。
+        </p>
+      ) : null}
+      {(detail.status === "draft" || detail.status === "withdrawn") &&
+      !detail.canSubmit ? (
+        <p className="hint">
+          {detail.isComplete
+            ? "目前無法送審。請管理員確認申請人的部門及預設審核人設定。"
+            : "請先在本人請購草稿填妥主旨、用途與 1–100 筆有效明細並保存。"}
+        </p>
+      ) : null}
+      {detail.status === "withdrawn" ? <h4>目前可編輯內容</h4> : null}
+      <RequisitionLines lines={detail.lines} />
+      {detail.previousRounds.length ? (
+        <>
+          <h4>先前送審輪次</h4>
+          {detail.previousRounds.map(
+            // 舊輪次只依伺服器回傳的可見範圍呈現，並保留瀏覽器原生展開操作。
+            (snapshot) => (
+              <details key={snapshot.round.number}>
+                <summary>第 {snapshot.round.number} 輪送審快照</summary>
+                <RequisitionRoundSnapshot snapshot={snapshot} />
+              </details>
+            ),
+          )}
+        </>
+      ) : null}
       <h4>操作歷程</h4>
       {history.length ? (
         <ol aria-label="操作歷程">
           {history.map(
-            // 每輪只有一次送審及每關一次決定；輪次和關卡識別事件。
+            // 每輪的送審和撤回沒有關卡，以事件種類區分；審核決定以關卡區分。
             ({ roundNumber, kind, stage, actor, occurredAt }) => (
               <li key={`${roundNumber}-${stage ?? kind}`}>
                 第 {roundNumber} 輪{" · "}
                 {kind === "submitted"
                   ? "送出簽核"
-                  : `${stage === "manager" ? "主管" : "財務"}${kind === "approved" ? "核准" : "駁回"}`}
+                  : kind === "withdrawn"
+                    ? "撤回修改"
+                    : `${stage === "manager" ? "主管" : "財務"}${kind === "approved" ? "核准" : "駁回"}`}
                 {" · "}
                 {actor.userName}
                 {" · "}
@@ -262,7 +341,7 @@ export function RequisitionApprovals({
     }
   }
 
-  // 只有已授權的新版明細能核對這一筆未確認結果；失敗時保留重讀入口。
+  // 以目前授權讀回單筆；暫時讀取失敗保留入口，無法核對原輪時明示限制。
   async function showDetail(id: string) {
     if (!beginOperation()) return;
     setReadError("");
@@ -271,17 +350,26 @@ export function RequisitionApprovals({
       setDetail(null);
       setNotice(null);
     }
+    const readback = readbacks[id];
     try {
-      // 取得同一筆目前的狀態與歷程；只在版本前進時移除該筆未決標記。
+      // 版本前進時顯示新明細，但原輪不在已授權歷程內就無法核對未知結果。
       const next = await readRequisition(getToken(), id);
-      const readback = readbacks[id];
       if (readback && readback.version !== next.version) {
+        const cannotConfirm =
+          !readback.confirmed &&
+          readback.roundNumber !== undefined &&
+          !next.history.some(
+            // 只用這次回應可見的歷程，不另查舊輪。
+            (event) => event.roundNumber === readback.roundNumber,
+          );
         onReadbackChange(id, null);
         setNotice({
           text: readback.confirmed
             ? `已${actionNames[readback.confirmed]}，並讀取最新狀態。`
-            : "已讀取最新狀態，請核對操作歷程。",
-          error: false,
+            : cannotConfirm
+              ? "已讀取最新狀態，但目前可見的歷程無法確認先前操作結果。"
+              : "已讀取最新狀態，請核對操作歷程。",
+          error: cannotConfirm,
         });
       } else if (retryId === id && notice?.error) {
         // 已讀回時撤下舊版本或資格拒絕指引，操作由新明細決定。
@@ -291,14 +379,26 @@ export function RequisitionApprovals({
       setRetryId(null);
       if (detailId === id) detailHeading.current?.focus();
     } catch (error) {
-      // 防偽或帳號失效時卸載整個畫面，其他讀取錯誤以結果入口恢復。
+      // 防偽或帳號失效時卸載畫面；暫時性讀取錯誤仍可從結果入口恢復。
       if (requiresSessionCheck(error)) {
         onSessionInvalid(`${error.message} 請重新確認身分。`);
       } else if (unavailable(error)) {
+        // 此單已無法讀回，移除同筆入口；查無不代表先前寫入被拒絕。
         setDetail(null);
         setList(null);
         setRetryId(null);
-        setReadError("找不到指定的請購單，請重新讀取請購列表。");
+        if (readback) onReadbackChange(id, null);
+        if (readback?.confirmed) {
+          setNotice({
+            text: `已${actionNames[readback.confirmed]}。`,
+            error: false,
+          });
+        }
+        setReadError(
+          readback && !readback.confirmed
+            ? "目前無法讀取這筆請購，無法確認先前操作結果。請重新讀取請購列表。"
+            : "找不到指定的請購單，請重新讀取請購列表。",
+        );
       } else {
         setRetryId(id);
         setReadError("無法讀取請購結果，請重新讀取。");
@@ -308,13 +408,18 @@ export function RequisitionApprovals({
     }
   }
 
-  // 送審或審核只從目前明細發出一次；後端驗證狀態、版本與當下資格。
+  // 送審、撤回或審核只從目前明細發出一次；後端驗證狀態、版本與當下資格。
   async function act(action: ApprovalAction) {
     // 重新讀取前不沿用已被拒絕或未確認的版本。
     if (!detail || !canAct) return;
     if (!beginOperation()) return;
     setNotice(null);
     setReadError("");
+    // 記下送出當時的輪次，供未知結果只從已授權的歷程核對。
+    const readback = {
+      version: detail.version,
+      roundNumber: detail.round?.number,
+    };
     try {
       // 以寫入回應顯示確認結果；即使回應內容遺失，也保留已確認成功的事實。
       const next = await writeApproval(getToken(), action, detail);
@@ -325,7 +430,7 @@ export function RequisitionApprovals({
         detailHeading.current?.focus();
       } else {
         onReadbackChange(detail.id, {
-          version: detail.version,
+          ...readback,
           confirmed: action,
         });
         setRetryId(detail.id);
@@ -350,7 +455,7 @@ export function RequisitionApprovals({
             error: true,
           });
         } else {
-          onReadbackChange(detail.id, { version: detail.version });
+          onReadbackChange(detail.id, readback);
         }
       }
     } finally {
@@ -429,6 +534,18 @@ export function RequisitionApprovals({
       {detail ? (
         <>
           <div className="requisition-actions">
+            {detail.canWithdraw ? (
+              <button
+                type="button"
+                disabled={!canAct}
+                onClick={
+                  // 僅依 API 的資格旗標顯示撤回，暫停狀態仍由伺服器判斷資格。
+                  () => void act("withdraw")
+                }
+              >
+                撤回修改
+              </button>
+            ) : null}
             {detail.canSubmit ? (
               <button
                 type="button"

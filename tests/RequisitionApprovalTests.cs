@@ -30,6 +30,8 @@ public sealed class RequisitionApprovalTests
         Assert.Equal("draft", detail.GetProperty("status").GetString());
         Assert.Equal(JsonValueKind.Null, detail.GetProperty("round").ValueKind);
         Assert.Empty(detail.GetProperty("history").EnumerateArray());
+        Assert.Empty(detail.GetProperty("previousRounds").EnumerateArray());
+        Assert.False(detail.GetProperty("canWithdraw").GetBoolean());
     }
 
     // 主管及財務依序作出決定；後續設定、部門與草稿寫入均不可改寫首輪內容。
@@ -109,6 +111,8 @@ public sealed class RequisitionApprovalTests
         AssertEvent(history[0], "submitted", null, scenario.Owner, submittedAt);
         AssertEvent(history[1], "approved", "manager", scenario.Manager, managerAt);
         AssertEvent(history[2], "approved", "finance", scenario.Finance, financeAt);
+        await Expect(await Post(owner, completed, "withdraw"), HttpStatusCode.Conflict, "invalid_state");
+        await Expect(await Post(owner, completed, "submit"), HttpStatusCode.Conflict, "invalid_state");
         await Expect(await Post(finance, completed, "reject"), HttpStatusCode.Conflict, "invalid_state");
         await AssertDraftClosed(owner, completed);
         Assert.True(JsonElement.DeepEquals(completed, await Detail(owner, draft)));
@@ -140,13 +144,14 @@ public sealed class RequisitionApprovalTests
         var reviewer = financeStage ? scenario.Finance : scenario.Manager;
         var rejected = await Act(reviewer.Client, prior, "reject");
 
-        // 驗證指定關卡只多一筆駁回，原單拒絕重送、修改、刪除及再次審核。
+        // 驗證指定關卡只多一筆駁回，原單拒絕撤回、重送、修改、刪除及再次審核。
         AssertStatus(rejected, "rejected", false, false);
         var history = rejected.GetProperty("history");
         Assert.Equal(financeStage ? 3 : 2, history.GetArrayLength());
         AssertEvent(history[history.GetArrayLength() - 1], "rejected", financeStage ? "finance" : "manager", reviewer,
             scenario.App.Clock.GetUtcNow());
         await Expect(await Post(owner, rejected, "submit"), HttpStatusCode.Conflict, "invalid_state");
+        await Expect(await Post(owner, rejected, "withdraw"), HttpStatusCode.Conflict, "invalid_state");
         await Expect(await Post(reviewer.Client, rejected, "reject"), HttpStatusCode.Conflict, "invalid_state");
         await AssertDraftClosed(owner, rejected);
         if (financeStage)
@@ -185,9 +190,10 @@ public sealed class RequisitionApprovalTests
 
     // 核對公開歷程的輪次、結果、關卡、操作者與可控時間。
     internal static void AssertEvent(
-        JsonElement entry, string kind, string? stage, RequisitionApprovalScenario.Business actor, DateTimeOffset time)
+        JsonElement entry, string kind, string? stage, RequisitionApprovalScenario.Business actor, DateTimeOffset time,
+        int roundNumber = 1)
     {
-        Assert.Equal(1, entry.GetProperty("roundNumber").GetInt32());
+        Assert.Equal(roundNumber, entry.GetProperty("roundNumber").GetInt32());
         Assert.Equal(kind, entry.GetProperty("kind").GetString());
         Assert.Equal(stage, entry.GetProperty("stage").GetString());
         var person = entry.GetProperty("actor");
@@ -196,7 +202,7 @@ public sealed class RequisitionApprovalTests
         Assert.Equal(time, entry.GetProperty("occurredAt").GetDateTimeOffset());
     }
 
-    // 草稿入口仍僅涵蓋從未送審的單，送審後直接呼叫保存與刪除也不能成功。
+    // 仍在審核或已結案的單不能從草稿入口讀取、保存或刪除。
     private static async Task AssertDraftClosed(HttpClient owner, JsonElement requisition)
     {
         // 使用目前有效版本和完整寫入形狀，確保拒絕來自既有草稿範圍。

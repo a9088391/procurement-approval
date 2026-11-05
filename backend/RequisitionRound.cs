@@ -50,21 +50,25 @@ internal sealed class RequisitionRound
             .HasForeignKey(r => r.FinanceId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        // 空關卡代表送審；同一輪僅一筆送審事件，每關僅一筆決定。
+        // 送審與撤回沒有關卡；各類事件獨立唯一，同一關的核准、駁回仍互斥。
         var history = builder.Entity<RequisitionApprovalEvent>();
         history.ToTable("RequisitionApprovalEvents", table => table.HasCheckConstraint(
             "CK_RequisitionApprovalEvents_KindStage",
             """
-            ("Kind" = 'submitted' AND "Stage" IS NULL) OR
+            ("Kind" IN ('submitted', 'withdrawn') AND "Stage" IS NULL) OR
             ("Kind" IN ('approved', 'rejected') AND "Stage" IS NOT NULL AND "Stage" IN ('manager', 'finance'))
             """));
         history.HasKey(e => e.Id);
         history.Property(e => e.Kind).HasMaxLength(20);
         history.Property(e => e.Stage).HasMaxLength(10);
+        // 保留請購及輪次的完整索引前綴；PostgreSQL 預設把 NULL 視為相異值。
         history
             .HasIndex(e => new { e.RequisitionId, e.RoundNumber, e.Stage })
+            .IsUnique();
+        history
+            .HasIndex(e => new { e.RequisitionId, e.RoundNumber, e.Kind })
             .IsUnique()
-            .AreNullsDistinct(false);
+            .HasFilter(""" "Stage" IS NULL """);
         history
             .HasOne<RequisitionRound>()
             .WithMany(r => r.History)
@@ -82,6 +86,7 @@ internal sealed class RequisitionRound
 internal sealed class RequisitionApprovalEvent
 {
     internal const string Submitted = "submitted";
+    internal const string Withdrawn = "withdrawn";
     internal const string ManagerStage = "manager";
     internal const string FinanceStage = "finance";
 

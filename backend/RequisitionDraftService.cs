@@ -3,13 +3,13 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Procurement;
 
-// 集中限制可讀寫的本人草稿；保存、刪除與登入活動在同一筆 PostgreSQL 交易完成。
+// 集中限制本人的可編輯請購；保存、刪除與登入活動在同一筆 PostgreSQL 交易完成。
 internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeProvider clock)
 {
-    // 清單按更新時間及識別排序，投影最少欄位且只涵蓋目前帳號的草稿。
+    // 清單按更新時間及識別排序，只涵蓋本人仍可編輯的請購。
     internal Task<IResult> List(ClaimsPrincipal principal, CancellationToken ct) => RunAsBusiness(principal, async applicantId =>
     {
-        var drafts = await OwnDrafts(applicantId)
+        var drafts = await OwnEditable(applicantId)
             .OrderByDescending(d => d.UpdatedAt)
             .ThenBy(d => d.Id)
             .Select(d => new DraftSummary(d.Id, d.Number, d.Subject, d.UpdatedAt))
@@ -20,7 +20,7 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
     // 重開時取得目前版本與全部明細；不可存取的資料沿用相同的 404。
     internal Task<IResult> Read(string id, ClaimsPrincipal principal, CancellationToken ct) => RunAsBusiness(principal, async applicantId =>
     {
-        var draft = await FindDraft(applicantId, id, ct, includeLines: true);
+        var draft = await FindEditable(applicantId, id, ct, includeLines: true);
         return draft is null ? NotFound() : Results.Ok(Response(draft));
     }, ct, write: false);
 
@@ -51,8 +51,8 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
     internal Task<IResult> Save(string id, SaveDraftRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
         RunAsBusiness(principal, async applicantId =>
         {
-            // 先限制本人及從未送審狀態，再辨識版本衝突，避免從錯誤推測他人的資料。
-            var draft = await FindDraft(applicantId, id, ct);
+            // 先限制本人及可編輯狀態，再辨識版本衝突，避免從錯誤推測他人的資料。
+            var draft = await FindEditable(applicantId, id, ct);
             if (draft is null)
                 return NotFound();
             if (CheckVersion(draft, request.Version) is { } conflict)
@@ -74,9 +74,9 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
     internal Task<IResult> Delete(string id, DeleteDraftRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
         RunAsBusiness(principal, async applicantId =>
         {
-            // 和保存共用所有權及版本判斷，讓兩種操作按同一列鎖順序生效。
-            var draft = await FindDraft(applicantId, id, ct);
-            if (draft is null)
+            // 沿用同一帳號列鎖，撤回單雖能保存，卻不能透過刪除移除歷史。
+            var draft = await FindEditable(applicantId, id, ct);
+            if (draft is null || draft.Status != Requisition.DraftStatus)
                 return NotFound();
             if (CheckVersion(draft, request.Version) is { } conflict)
                 return conflict;
@@ -116,19 +116,21 @@ internal sealed class RequisitionDraftService(AuthDb db, AuthService auth, TimeP
         return result;
     }
 
-    // 本人且仍屬從未送審狀態的查詢範圍，供清單、單筆與異動一致使用。
-    private IQueryable<Requisition> OwnDrafts(string applicantId) =>
-        db.Requisitions.Where(d => d.ApplicantId == applicantId && d.Status == Requisition.DraftStatus);
+    // 本人草稿與撤回修改中的單共用可編輯範圍；刪除另有從未送審限制。
+    private IQueryable<Requisition> OwnEditable(string applicantId) =>
+        db.Requisitions.Where(d => d.ApplicantId == applicantId
+            && (d.Status == Requisition.DraftStatus
+                || d.Status == Requisition.Withdrawn));
 
     // 將無效或不可存取的識別視為找不到，只有重開時讀取現有明細。
-    private Task<Requisition?> FindDraft(string applicantId, string id, CancellationToken ct, bool includeLines = false)
+    private Task<Requisition?> FindEditable(string applicantId, string id, CancellationToken ct, bool includeLines = false)
     {
         // 無法解析的識別不查資料庫，與有效但不在存取範圍的識別共用回應。
         if (!Guid.TryParse(id, out var draftId))
             return Task.FromResult<Requisition?>(null);
 
         // 異動不需先讀舊明細，避免不必要的追蹤及逐列刪除。
-        var query = OwnDrafts(applicantId);
+        var query = OwnEditable(applicantId);
         if (includeLines)
             query = query.Include(draft => draft.Lines);
         return query.SingleOrDefaultAsync(d => d.Id == draftId, ct);

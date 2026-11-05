@@ -14,6 +14,10 @@ internal sealed record RequisitionRoundSummary(
 internal sealed record RequisitionHistoryEntry(
     int RoundNumber, string Kind, string? Stage, RequisitionPerson Actor, DateTimeOffset OccurredAt);
 
+// 先前輪次僅供申請人查閱，固定內容與該輪部門、指派放在一起。
+internal sealed record RequisitionPreviousRound(
+    RequisitionRoundSummary Round, string? Subject, string? Purpose, decimal? EstimatedAmount, DraftLineResponse[] Lines);
+
 // 清單不載入逐筆明細與歷程；操作提示仍按目前身分及未完成關卡判斷。
 internal record RequisitionSummary(
     Guid Id,
@@ -29,24 +33,28 @@ internal record RequisitionSummary(
     bool CanDecide,
     RequisitionRoundSummary? Round);
 
-// 明細沿用清單欄位，另公開內容、歷程及送審資格，供開單與簽核畫面讀取。
+// 明細沿用清單欄位，另公開內容、可用操作及符合目前身分的歷程。
 internal sealed record RequisitionDetail : RequisitionSummary
 {
     // 複製已通過授權的摘要，將明細展開為同一層 JSON 欄位。
     internal RequisitionDetail(
         RequisitionSummary summary, string? purpose, DraftLineResponse[] lines, bool isComplete, bool canSubmit,
-        RequisitionHistoryEntry[] history) : base(summary)
+        bool canWithdraw, RequisitionHistoryEntry[] history, RequisitionPreviousRound[] previousRounds) : base(summary)
     {
         Purpose = purpose;
         Lines = lines;
         IsComplete = isComplete;
         CanSubmit = canSubmit;
+        CanWithdraw = canWithdraw;
         History = history;
+        PreviousRounds = previousRounds;
     }
 
     public string? Purpose { get; }
     public DraftLineResponse[] Lines { get; }
     public bool IsComplete { get; }
     public bool CanSubmit { get; }
+    public bool CanWithdraw { get; }
     public RequisitionHistoryEntry[] History { get; }
+    public RequisitionPreviousRound[] PreviousRounds { get; }
 }

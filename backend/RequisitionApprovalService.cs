@@ -9,6 +9,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
 {
     private const string ManagerRole = "Manager";
     private const string FinanceRole = "Finance";
+    private static readonly string[] DecisionKinds = [Requisition.Approved, Requisition.Rejected];
 
     // 列出本人及目前業務角色可見的請購，清單不載入逐筆明細。
     internal Task<IResult> List(ClaimsPrincipal principal, CancellationToken ct) => RunAsBusiness(principal, async (actor, roles) =>
@@ -22,11 +23,11 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             return summary is null ? NotFound() : Results.Ok(await Detail(summary, actor, ct));
         }, ct);
 
-    // 以本人已保存的草稿和目前組織設定建立第一輪，禁止客戶端代填任何資料。
+    // 以本人已保存的內容和目前組織設定建立新一輪，不沿用舊快照或人選。
     internal Task<IResult> Submit(string id, ApprovalRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
         RunAsBusiness(principal, async (actor, roles) =>
         {
-            // 先套用可見範圍，只有本人才能送審，並且必須使用目前的草稿版本。
+            // 先套用可見範圍，只有本人能以目前版本送審草稿或撤回單。
             var summary = await FindVisible(actor, roles, id, ct);
             if (summary is null)
                 return NotFound();
@@ -34,11 +35,11 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 return Forbidden();
             if (CheckVersion(summary, request.Version) is { } versionError)
                 return versionError;
-            if (summary.Status != Requisition.DraftStatus)
+            if (summary.Status is not (Requisition.DraftStatus or Requisition.Withdrawn))
                 return InvalidState();
 
-            // 由帳號列鎖保護草稿讀取，完整內容合格才查詢送審部門與預設審核人。
-            var draft = await LoadDraft(summary.Id, ct);
+            // 由帳號列鎖保護可編輯內容，內容合格才查詢送審部門與預設審核人。
+            var draft = await LoadEditable(summary.Id, ct);
             if (!RequisitionDraftInput.CanSubmit(draft))
                 return AuthService.Error(400, "invalid_input", "請填妥主旨、用途及 1–100 筆有效明細。");
             if (actor.DepartmentId is null)
@@ -52,7 +53,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             var round = new RequisitionRound
             {
                 RequisitionId = draft.Id,
-                Number = 1,
+                Number = (summary.Round?.Number ?? 0) + 1,
                 DepartmentId = department.Id,
                 DepartmentName = department.Name,
                 ManagerId = reviewers.Manager,
@@ -70,6 +71,49 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             Advance(draft, Requisition.ManagerPending, now);
             return await SaveAndRead(actor, roles, draft.Id, ct);
         }, ct, write: true);
+
+    // 撤回與首關決定共用交易鎖，暫停不影響尚未決定時的撤回資格。
+    internal Task<IResult> Withdraw(string id, ApprovalRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
+        RunAsBusiness(principal, async (actor, roles) =>
+        {
+            // 與送審相同，先確認可見及所有權，再辨識過期版本與非法狀態。
+            var summary = await FindVisible(actor, roles, id, ct);
+            if (summary is null)
+                return NotFound();
+            if (summary.Applicant.Id != actor.Id)
+                return Forbidden();
+            if (CheckVersion(summary, request.Version) is { } versionError)
+                return versionError;
+            if (WithdrawalCandidate(summary) is not { } round)
+                return InvalidState();
+
+            // 持鎖查當輪是否已有決定，撤回資格以實際歷程為準。
+            var decided = await db
+                .RequisitionApprovalEvents
+                .AnyAsync(e => e.RequisitionId == summary.Id
+                    && e.RoundNumber == round.Number
+                    && DecisionKinds.Contains(e.Kind), ct);
+            if (decided)
+                return InvalidState();
+
+            // 不改寫送審快照；狀態與撤回事件一起提交，同時對其他帳號隱藏。
+            var requisition = await db.Requisitions.SingleAsync(d => d.Id == summary.Id, ct);
+            var now = Requisition.CurrentTimestamp(clock);
+            db.RequisitionApprovalEvents.Add(new RequisitionApprovalEvent
+            {
+                RequisitionId = requisition.Id,
+                RoundNumber = round.Number,
+                Kind = RequisitionApprovalEvent.Withdrawn,
+                ActorId = actor.Id,
+                OccurredAt = now
+            });
+            Advance(requisition, Requisition.Withdrawn, now);
+            return await SaveAndRead(actor, roles, requisition.Id, ct);
+        }, ct, write: true);
+
+    // 只有最新的主管待審輪次可以撤回；暫停時仍以有無審核決定判斷。
+    private static RequisitionRoundSummary? WithdrawalCandidate(RequisitionSummary summary) =>
+        summary.Status == Requisition.ManagerPending ? summary.Round : null;
 
     // 指定審核者只能決定輪到本人的關卡；任何尚未完成的指派失格即暫停。
     internal Task<IResult> Decide(
@@ -110,7 +154,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             return await SaveAndRead(actor, roles, draft.Id, ct);
         }, ct, write: true);
 
-    // 與管理端採相同鎖序，讓跨帳號資格變更、送審、決定及讀回反映同一筆已提交結果。
+    // 與管理端採相同鎖序，讓資格變更、送審、撤回、決定及讀回反映同一筆已提交結果。
     private async Task<IResult> RunAsBusiness(
         ClaimsPrincipal principal, Func<AppUser, string[], Task<IResult>> operation, CancellationToken ct, bool write = false)
     {
@@ -138,7 +182,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
     // 集中定義可見範圍與待辦提示，讓單筆查詢和清單使用同一個 PostgreSQL 查詢。
     private IQueryable<RequisitionSummary> Visible(AppUser actor, string[] roles, Guid? id = null)
     {
-        // 目前部門和角色決定讀取範圍，原指派可跨部門；財務資格另看該輪有無主管核准。
+        // 其他帳號僅能查已送審且未撤回的單；目前部門、指派及財務進關依最新一輪判定。
         var manager = roles.Contains(ManagerRole);
         var finance = roles.Contains(FinanceRole);
         var eligibleManagers = EligibleReviewerIds(ManagerRole);
@@ -232,13 +276,13 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
         return eligible == 2 ? (manager, finance) : null;
     }
 
-    // 草稿載入共用已鎖定的交易，只有通過授權的本人草稿會讀取可編輯內容。
-    private Task<Requisition> LoadDraft(Guid id, CancellationToken ct) => db
+    // 讀取已授權本人的可編輯內容；同一帳號列鎖避免讀到一半被保存取代。
+    private Task<Requisition> LoadEditable(Guid id, CancellationToken ct) => db
         .Requisitions
         .Include(d => d.Lines)
         .SingleAsync(d => d.Id == id, ct);
 
-    // 快照只複製當次內容，保留原始明細位置且不追蹤草稿實體。
+    // 快照只複製當次內容，保留原始明細位置且不追蹤可編輯的實體。
     private static RequisitionSnapshot Snapshot(Requisition requisition) => new(
         requisition.Subject, requisition.Purpose, requisition.EstimatedAmount, requisition
             .Lines
@@ -246,39 +290,87 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             .Select(l => new RequisitionSnapshotLine(l.ItemName, l.Unit, l.Quantity, l.UnitPrice))
             .ToArray());
 
-    // 讀取已授權的單，從草稿或固定快照取得內容；歷程沿用資料庫事件順序。
+    // 已授權的單依狀態讀目前內容；只有本人取得舊輪快照及跨輪歷程。
     private async Task<RequisitionDetail> Detail(RequisitionSummary summary, AppUser actor, CancellationToken ct)
     {
-        // 草稿尚無歷程，完整性沿用既有欄位規則；可送審另需有效部門關聯及預設人選。
-        if (summary.Round is not { } round)
-        {
-            var draft = await LoadDraft(summary.Id, ct);
-            var canSubmit = RequisitionDraftInput.CanSubmit(draft)
-                && actor.DepartmentId is not null
-                && await DefaultReviewers(actor, ct) is not null;
-            return new RequisitionDetail(summary, draft.Purpose, DetailLines(Snapshot(draft).Lines),
-                RequisitionDraftInput.IsComplete(draft), canSubmit, []);
-        }
-
-        // 送審後的內容從獨立快照讀取，部門、人選與決定不由目前的申請人設定推算。
-        var content = await db
-            .RequisitionRounds
-            .Where(r => r.RequisitionId == summary.Id && r.Number == round.Number)
-            .Select(r => r.Content)
-            .SingleAsync(ct);
-        var snapshot = JsonSerializer.Deserialize<RequisitionSnapshot>(content, JsonSerializerOptions.Web)
-            ?? throw new InvalidOperationException("請購送審快照不得為空。");
-        var history = await db
+        // 本人可讀所有事件；其他可見者只能讀最新一輪，查詢及操作回應共用此限制。
+        var owner = summary.Applicant.Id == actor.Id;
+        var round = summary.Round;
+        var history = round is null ? [] : await db
             .RequisitionApprovalEvents
-            .Where(e => e.RequisitionId == summary.Id)
+            .Where(e => e.RequisitionId == summary.Id && (owner || e.RoundNumber == round.Number))
             .OrderBy(e => e.RoundNumber)
             .ThenBy(e => e.Id)
             .Select(e => new RequisitionHistoryEntry(e.RoundNumber, e.Kind, e.Stage,
                 new RequisitionPerson(e.ActorId, e.Actor != null ? e.Actor.UserName ?? "" : ""), e.OccurredAt))
             .ToArrayAsync(ct);
+
+        // 撤回後最後一次送審內容也是歷史；其餘已送審狀態以最新輪作為目前內容。
+        var editable = summary.Status is Requisition.DraftStatus or Requisition.Withdrawn;
+        var previous = owner
+            && round is not null
+            && (editable || round.Number > 1)
+                ? await PreviousRounds(summary.Id, editable ? round.Number : round.Number - 1, ct)
+                : [];
+        if (editable)
+        {
+            // 只有本人可見可編輯單；重送和首送都以目前內容、部門關聯及預設人選判斷。
+            var draft = await LoadEditable(summary.Id, ct);
+            var canSubmit = RequisitionDraftInput.CanSubmit(draft)
+                && actor.DepartmentId is not null
+                && await DefaultReviewers(actor, ct) is not null;
+            return new RequisitionDetail(summary, draft.Purpose, DetailLines(Snapshot(draft).Lines),
+                RequisitionDraftInput.IsComplete(draft), canSubmit, canWithdraw: false, history, previous);
+        }
+
+        // 送審後的內容從獨立快照讀取，部門、人選與決定不由目前的申請人設定推算。
+        if (round is null)
+            throw new InvalidOperationException("已送審的請購必須有送審輪次。");
+        var content = await db
+            .RequisitionRounds
+            .Where(r => r.RequisitionId == summary.Id && r.Number == round.Number)
+            .Select(r => r.Content)
+            .SingleAsync(ct);
+        var snapshot = ReadSnapshot(content);
+
+        // 與撤回操作共用輪次和決定種類，利用已讀取的本人歷程判斷按鈕資格。
+        var canWithdraw = owner
+            && WithdrawalCandidate(summary) is { } candidate
+            && !history.Any(e => e.RoundNumber == candidate.Number && DecisionKinds.Contains(e.Kind));
         return new RequisitionDetail(summary with { Subject = snapshot.Subject, EstimatedAmount = snapshot.EstimatedAmount },
-            snapshot.Purpose, DetailLines(snapshot.Lines), isComplete: true, canSubmit: false, history);
+            snapshot.Purpose, DetailLines(snapshot.Lines), isComplete: true, canSubmit: false, canWithdraw, history, previous);
     }
+
+    // 僅供本人明細一次取回所有符合範圍的舊輪，依原輪次排列，不逐輪查詢。
+    private async Task<RequisitionPreviousRound[]> PreviousRounds(Guid id, int throughRound, CancellationToken ct)
+    {
+        // SQL 只讀到需要的輪次，並合併當時的部門及指派關聯。
+        var previous = await db
+            .RequisitionRounds
+            .Where(r => r.RequisitionId == id && r.Number <= throughRound)
+            .OrderBy(r => r.Number)
+            .Select(r => new
+            {
+                r.Content,
+                Round = new RequisitionRoundSummary(r.Number, new RequisitionDepartment(r.DepartmentId, r.DepartmentName),
+                    r.SubmittedAt, new RequisitionPerson(r.ManagerId, r.Manager != null ? r.Manager.UserName ?? "" : ""),
+                    new RequisitionPerson(r.FinanceId, r.Finance != null ? r.Finance.UserName ?? "" : ""))
+            })
+            .ToArrayAsync(ct);
+
+        // 目前及歷史輪次以相同 DTO 表示快照內容，不直接回傳持久化 JSON。
+        return previous.Select(p =>
+        {
+            var snapshot = ReadSnapshot(p.Content);
+            return new RequisitionPreviousRound(p.Round, snapshot.Subject, snapshot.Purpose,
+                snapshot.EstimatedAmount, DetailLines(snapshot.Lines));
+        }).ToArray();
+    }
+
+    // 已送審輪次必有快照，讀取時保持固定格式並將損毀視為錯誤。
+    private static RequisitionSnapshot ReadSnapshot(string content) =>
+        JsonSerializer.Deserialize<RequisitionSnapshot>(content, JsonSerializerOptions.Web)
+        ?? throw new InvalidOperationException("請購送審快照不得為空。");
 
     // 共用草稿明細的公開欄位與精確小計，避免將持久化快照直接傳給客戶端。
     private static DraftLineResponse[] DetailLines(RequisitionSnapshotLine[] lines) => lines

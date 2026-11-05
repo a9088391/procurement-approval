@@ -552,6 +552,253 @@ test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照
   }
 });
 
+// 實際撤回後只供本人修改並重送，同時驗證失聯結果及舊輪次隔離。
+test("本人撤回後核對原輪快照、修改同單重送，審核者只見最新輪", async ({
+  page,
+  browser,
+}) => {
+  const subject = `撤回舊主旨-${runId}-${"長快照".repeat(36)}`;
+  const editedSubject = `重送新主旨-${runId}`;
+  const itemName = `舊輪明細-${"OldSnapshotItem".repeat(10)}`;
+  const editedItem = `新輪明細-${runId}`;
+  const managerContext = await browser.newContext();
+
+  try {
+    // 申請人從真實草稿表單建立第一輪，送審內容由伺服器建立快照。
+    await login(page, "applicant");
+    await saveThroughUI(page, subject, itemName);
+    const owner = await approvals(page);
+    await openApproval(owner, subject);
+    const [firstResponse] = await Promise.all([
+      page.waitForResponse(
+        // 僅將同一請購的送審 POST 當作第一輪寫入結果。
+        (response) =>
+          response.url().endsWith("/submit") &&
+          response.request().method() === "POST",
+      ),
+      owner.getByRole("button", { name: "送出簽核", exact: true }).click(),
+    ]);
+    expect(firstResponse.status()).toBe(200);
+    const firstRound: RequisitionDetailDto = await firstResponse.json();
+    expect(firstRound.round?.number).toBe(1);
+    const roundDepartmentName = firstRound.round?.department.name;
+    expect(roundDepartmentName).toBeTruthy();
+
+    // 主管先以原指派開啟資料，之後確認撤回即時移除查閱權限。
+    const managerPage = await managerContext.newPage();
+    const manager = await openActor(managerPage, "manager");
+    await expect(rowFor(manager, subject)).toHaveCount(1);
+    await openApproval(manager, subject);
+
+    // 伺服器實際完成撤回後切斷回應，檢查畫面保留未知結果且沒有自動重送。
+    let withdrawPosts = 0;
+    await page.route(
+      `**/api/requisitions/${firstRound.id}/withdraw`,
+      async (route) => {
+        withdrawPosts++;
+        expect(route.request().postDataJSON()).toEqual({
+          version: firstRound.version,
+        });
+        const committed = await route.fetch();
+        expect(committed.status()).toBe(200);
+        await route.abort("failed");
+      },
+    );
+    const withdrawButton = owner.getByRole("button", {
+      name: "撤回修改",
+      exact: true,
+    });
+    await expect(withdrawButton).toBeVisible();
+    await withdrawButton.click();
+    const unknown = owner
+      .getByRole("alert")
+      .filter({ hasText: "操作結果未確認" });
+    await expect(unknown).toBeVisible();
+    await expect(
+      owner.getByRole("button", { name: "撤回修改", exact: true }),
+    ).toBeDisabled();
+    const readback = owner.getByRole("button", {
+      name: "重新讀取結果",
+      exact: true,
+    });
+    await expect(readback).toBeEnabled();
+    expect(withdrawPosts).toBe(1);
+
+    // 由使用者明確 GET 核對同一筆，確認撤回狀態與原送審輪次。
+    await readback.click();
+    await expect(owner.getByText("撤回修改中", { exact: true })).toBeVisible();
+    await expect(unknown).toHaveCount(0);
+    await expect(
+      owner.getByRole("button", { name: "撤回修改", exact: true }),
+    ).toHaveCount(0);
+    await expect(owner.getByRole("status")).toContainText("已讀取最新狀態");
+    await history(owner, [
+      `送出簽核 · ${actorName("applicant")}`,
+      `撤回修改 · ${actorName("applicant")}`,
+    ]);
+    const previousRound = owner.locator("details");
+    await expect(previousRound).toHaveCount(1);
+    await previousRound.locator("summary").click();
+    await expect(previousRound).toContainText(subject);
+    await expect(previousRound).toContainText("補充辦公設備");
+    await expect(previousRound).toContainText(itemName);
+    const oldDepartment = previousRound
+      .getByText("送審部門", { exact: true })
+      .locator("xpath=following-sibling::dd[1]");
+    expect(await oldDepartment.textContent()).toBe(roundDepartmentName);
+    expect(withdrawPosts).toBe(1);
+
+    // 主管重讀清單後看不到該單，直接讀取同一識別亦只能得到不可見結果。
+    await manager
+      .getByRole("button", { name: "返回請購列表", exact: true })
+      .click();
+    await expect(rowFor(manager, subject)).toHaveCount(0);
+    const hidden = await managerPage.request.get(
+      `${baseURL}/api/requisitions/${firstRound.id}`,
+      {
+        headers: { "X-CSRF-TOKEN": await csrf(managerPage.request) },
+      },
+    );
+    expect(hidden.status()).toBe(404);
+
+    // 本人以原單號開啟撤回內容；撤回歷程不可刪除，已送審單不提供刪除。
+    await page
+      .getByRole("button", { name: "本人請購草稿", exact: true })
+      .click();
+    const drafts = page.getByRole("region", { name: "本人請購草稿" });
+    const editorButton = drafts.getByRole("button", {
+      name: `開啟草稿 ${firstRound.number}`,
+      exact: true,
+    });
+    await expect(editorButton).toBeEnabled();
+    await editorButton.click();
+    const form = drafts.getByRole("form", {
+      name: `編輯草稿 ${firstRound.number}`,
+    });
+    await expect(form).toContainText("撤回修改中");
+    await expect(
+      form.getByRole("button", { name: "刪除草稿", exact: true }),
+    ).toHaveCount(0);
+    await form.getByLabel("主旨", { exact: true }).fill(editedSubject);
+    await form
+      .getByRole("textbox", { name: "整單用途", exact: true })
+      .fill("修改後用途");
+    const line = form.getByRole("group", { name: "明細 1" });
+    await line.getByLabel("品名", { exact: true }).fill(editedItem);
+    const [savedResponse] = await Promise.all([
+      page.waitForResponse(
+        // 保存必須更新原識別，不能建立第二張草稿。
+        (response) =>
+          response.url().endsWith(`/drafts/${firstRound.id}`) &&
+          response.request().method() === "POST",
+      ),
+      form.getByRole("button", { name: "保存草稿", exact: true }).click(),
+    ]);
+    expect(savedResponse.status()).toBe(200);
+    const saved = await savedResponse.json();
+    expect(saved.id).toBe(firstRound.id);
+    expect(saved.number).toBe(firstRound.number);
+    expect(saved.status).toBe("withdrawn");
+    await expect(drafts.getByRole("status")).toHaveText("草稿已保存。");
+    await expect(
+      form.getByRole("button", { name: "刪除草稿", exact: true }),
+    ).toHaveCount(0);
+
+    // 回到既有簽核面板，以同識別與新保存內容重送為第二輪。
+    await page
+      .getByRole("button", { name: "請購查閱與簽核", exact: true })
+      .click();
+    const ownerApprovals = page.getByRole("region", {
+      name: "請購查閱與簽核",
+    });
+    await expect(rowFor(ownerApprovals, editedSubject)).toHaveCount(1);
+    await openApproval(ownerApprovals, editedSubject);
+    await expect(
+      ownerApprovals.getByText("撤回修改中", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      ownerApprovals.getByText(editedItem, { exact: true }),
+    ).toBeVisible();
+    const [secondResponse] = await Promise.all([
+      page.waitForResponse(
+        // 第二輪仍使用既有 submit 操作及原單識別。
+        (response) =>
+          response.url().endsWith("/submit") &&
+          response.request().method() === "POST",
+      ),
+      ownerApprovals
+        .getByRole("button", { name: "送出簽核", exact: true })
+        .click(),
+    ]);
+    expect(secondResponse.status()).toBe(200);
+    const secondRound: RequisitionDetailDto = await secondResponse.json();
+    expect(secondRound.id).toBe(firstRound.id);
+    expect(secondRound.number).toBe(firstRound.number);
+    expect(secondRound.status).toBe("manager_pending");
+    expect(secondRound.round?.number).toBe(2);
+    expect(secondRound.previousRounds).toHaveLength(1);
+    expect(secondRound.previousRounds[0].subject).toBe(subject);
+    await history(ownerApprovals, [
+      `送出簽核 · ${actorName("applicant")}`,
+      `撤回修改 · ${actorName("applicant")}`,
+      `送出簽核 · ${actorName("applicant")}`,
+    ]);
+
+    // 展開舊輪快照，在手機與桌面寬度檢查內容換行及鍵盤可用控制項。
+    const previousRounds = ownerApprovals.locator("details");
+    await expect(previousRounds).toHaveCount(1);
+    await previousRounds.locator("summary").click();
+    await expect(previousRounds).not.toContainText("修改後用途");
+    await expect(previousRounds).toContainText(itemName);
+    const oldRoundDepartment = previousRounds
+      .getByText("送審部門", { exact: true })
+      .locator("xpath=following-sibling::dd[1]");
+    expect(await oldRoundDepartment.textContent()).toBe(roundDepartmentName);
+    await checkLayout(
+      page,
+      ownerApprovals,
+      itemName,
+      "approval-withdrawal-round",
+    );
+
+    // 重送後原主管只取得第二輪明細與事件，不能讀到先前輪次內容。
+    await manager
+      .getByRole("button", { name: "重新讀取請購列表", exact: true })
+      .click();
+    await expect(rowFor(manager, editedSubject)).toHaveCount(1);
+    await openApproval(manager, editedSubject);
+    await expect(manager.getByText("主管待審", { exact: true })).toBeVisible();
+    await expect(manager.getByText(editedItem, { exact: true })).toBeVisible();
+    await expect(manager.getByText(itemName, { exact: true })).toHaveCount(0);
+    await expect(manager.locator("details")).toHaveCount(0);
+    await history(manager, [`送出簽核 · ${actorName("applicant")}`]);
+
+    // 主管首次核准後，申請人讀回最新狀態即可確認撤回按鈕已消失。
+    await manager.getByRole("button", { name: "核准", exact: true }).click();
+    await expect(manager.getByText("財務待審", { exact: true })).toBeVisible();
+    await ownerApprovals
+      .getByRole("button", { name: "返回請購列表", exact: true })
+      .click();
+    await expect(rowFor(ownerApprovals, editedSubject)).toHaveCount(1);
+    await openApproval(ownerApprovals, editedSubject);
+    await expect(
+      ownerApprovals.getByText("財務待審", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      ownerApprovals.getByRole("button", { name: "撤回修改", exact: true }),
+    ).toHaveCount(0);
+    await history(ownerApprovals, [
+      `送出簽核 · ${actorName("applicant")}`,
+      `撤回修改 · ${actorName("applicant")}`,
+      `送出簽核 · ${actorName("applicant")}`,
+      `主管核准 · ${actorName("manager")}`,
+    ]);
+  } finally {
+    // 關閉本案例獨立的主管瀏覽器工作階段。
+    await managerContext.close();
+  }
+});
+
 // 從不同真實登入更新同一筆版本，確認舊畫面只在 GET 讀回後恢復。
 test("另一個工作階段先核准後，舊版本駁回必須讀回，歷程只留下核准", async ({
   page,
@@ -720,6 +967,147 @@ test("回應中斷後保留原筆未知結果，同帳號恢復身分後可讀�
   }
 });
 
+for (const resubmit of [false, true]) {
+  const scenario = resubmit ? "已重送" : "仍撤回";
+
+  // 讓撤回先提交，主管只遺失較晚核准的回應；依重讀當下的授權核對畫面。
+  test(`撤回後遺失核准回應：${scenario}時結束無法核對的舊操作`, async ({
+    page,
+    playwright,
+  }) => {
+    const subject = `撤回先於核准-${scenario}-${runId}`;
+    const otherSubject = `另筆待核對-${runId}`;
+    const applicant = await playwright.request.newContext({ baseURL });
+    try {
+      // 用獨立的本人 Cookie 準備同一主管的待審單，避免覆寫瀏覽器身分。
+      await apiLogin(applicant, actorName("applicant"), finalPassword);
+      const headers = { "X-CSRF-TOKEN": await csrf(applicant) };
+      const first = await seedPending(applicant, subject);
+      const other = resubmit
+        ? null
+        : await seedPending(applicant, otherSubject);
+      await login(page, "manager");
+      const region = await approvals(page);
+      const readback = region.getByRole("button", { name: /^重新讀取結果/ });
+
+      // 404 分支另保留一筆可核對的結果，確認清除範圍只有原單。
+      if (other) {
+        await openApproval(region, otherSubject);
+        await page.route(
+          `**/api/requisitions/${other.id}/reject`,
+          async (route) => {
+            // 真實駁回已提交，瀏覽器只知道回應遺失。
+            const committed = await route.fetch();
+            expect(committed.status()).toBe(200);
+            await route.abort("failed");
+          },
+        );
+        await region.getByRole("button", { name: "駁回", exact: true }).click();
+        await expect(readback).toBeEnabled();
+        await region.getByRole("button", { name: "返回請購列表" }).click();
+      }
+
+      // 攔到主管原始 POST 才撤回；送達伺服器後核對真實 404，再中斷瀏覽器回應。
+      await openApproval(region, subject);
+      const detailPath = `/api/requisitions/${first.id}`;
+      let approvePosts = 0;
+      let withdrawnVersion = "";
+      await page.route(`**${detailPath}/approve`, async (route) => {
+        // 只對首次請求安排撤回，之後即使出現意外重送也交給次數斷言。
+        approvePosts++;
+        if (approvePosts === 1) {
+          const withdrawn = await applicant.post(`${detailPath}/withdraw`, {
+            headers,
+            data: { version: first.version },
+          });
+          expect(withdrawn.status()).toBe(200);
+          const detail: RequisitionDetailDto = await withdrawn.json();
+          expect(detail.status).toBe("withdrawn");
+          withdrawnVersion = detail.version;
+          const rejected = await route.fetch();
+          expect(rejected.status()).toBe(404);
+        }
+        await route.abort("failed");
+      });
+      await region.getByRole("button", { name: "核准", exact: true }).click();
+      const targetReadback = readback.nth(other ? 1 : 0);
+      await expect(targetReadback).toBeEnabled();
+      await expect(
+        region.getByRole("button", { name: "核准", exact: true }),
+      ).toBeDisabled();
+      expect(approvePosts).toBe(1);
+
+      // 在讀回前才重送；只有第二輪現在能被主管讀取。
+      if (resubmit) {
+        const submitted = await applicant.post(`${detailPath}/submit`, {
+          headers,
+          data: { version: withdrawnVersion },
+        });
+        expect(submitted.status()).toBe(200);
+      }
+      const [read] = await Promise.all([
+        page.waitForResponse(
+          // 讀回必須對原單發出 GET，不能將別筆結果誤當成這筆。
+          (response) =>
+            response.url().endsWith(detailPath) &&
+            response.request().method() === "GET",
+        ),
+        targetReadback.click(),
+      ]);
+      expect(read.status()).toBe(resubmit ? 200 : 404);
+
+      // 兩種回應都應明示無法確認舊操作，且不再要求重讀這一筆。
+      if (resubmit) {
+        await history(region, [
+          `第 2 輪 · 送出簽核 · ${actorName("applicant")}`,
+        ]);
+        await expect(
+          region.getByText("請核對操作歷程。", { exact: false }),
+        ).toHaveCount(0);
+        await expect(region.getByRole("alert")).toContainText(
+          "無法確認先前操作結果",
+        );
+        await expect(readback).toHaveCount(0);
+        await expect(
+          region.getByRole("button", { name: "核准", exact: true }),
+        ).toBeEnabled();
+
+        // 由主管明確決定第二輪，確認舊結果的提示不會鎖住新一輪。
+        await region.getByRole("button", { name: "駁回", exact: true }).click();
+        await expect(region.getByRole("status")).toHaveText("已駁回。");
+        await history(region, [
+          `第 2 輪 · 送出簽核 · ${actorName("applicant")}`,
+          `第 2 輪 · 主管駁回 · ${actorName("manager")}`,
+        ]);
+      } else {
+        // 只移除查無的案件，重新載入清單後仍可核對另一筆未知結果。
+        await expect(
+          region.getByRole("heading", { name: /^請購明細 / }),
+        ).toHaveCount(0);
+        await expect(
+          region.getByText("目前無法讀取這筆請購，無法確認先前操作結果。", {
+            exact: false,
+          }),
+        ).toBeVisible();
+        await expect(readback).toHaveCount(1);
+        await region
+          .getByRole("button", { name: "重新讀取請購列表", exact: true })
+          .click();
+        await expect(rowFor(region, otherSubject)).toHaveCount(1);
+        await expect(rowFor(region, subject)).toHaveCount(0);
+        await readback.click();
+        await expect(
+          region.getByText("駁回結案", { exact: true }),
+        ).toBeVisible();
+        await expect(readback).toHaveCount(0);
+      }
+      expect(approvePosts).toBe(1);
+    } finally {
+      await applicant.dispose();
+    }
+  });
+}
+
 // 已收到 200 後只遺失明細；原帳號可恢復成功提示，換帳號則隔離原資料和標記。
 test("已確認寫入與讀回失敗分開，同帳號可恢復，跨分頁換帳號移除舊提示", async ({
   page,
@@ -767,11 +1155,24 @@ test("已確認寫入與讀回失敗分開，同帳號可恢復，跨分頁換�
       exact: true,
     });
 
-    // 欄位不完整、巢狀歷程或狀態錯誤、以及不同單的 GET 都不能結束讀回。
+    // 欄位不完整、巢狀歷程／輪次或資格旗標錯誤都不能結束讀回。
     const detailUrl = `**/api/requisitions/${first.id}`;
     for (const invalid of [
       null,
       { history: [null] },
+      { canWithdraw: null },
+      { previousRounds: [null] },
+      {
+        previousRounds: [
+          {
+            round: null,
+            subject: null,
+            purpose: null,
+            estimatedAmount: null,
+            lines: [null],
+          },
+        ],
+      },
       { status: "unknown" },
       { id: second.id },
     ]) {
