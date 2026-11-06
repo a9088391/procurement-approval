@@ -10,7 +10,7 @@
 docker compose -p procurement-approval up --build -d
 ```
 
-開啟 `http://127.0.0.1:5080`。使用本機編輯器查看 `.local/initial-accounts.json` 取得隨機初始密碼；不要將檔案內容貼到聊天、截圖或公開紀錄。帳號為 `admin`（管理帳號）、`applicant`（申請人）、`manager`（主管）、`finance`（財務）。
+開啟 `http://127.0.0.1:5080`。首次初始化後，在本機編輯器查看 `.local/initial-accounts.json` 取得隨機初始密碼。若曾復原管理員或重設展示，請使用對應命令顯示的憑證檔。請在本機保管密碼。帳號為 `admin`（管理帳號）、`applicant`（申請人）、`manager`（主管）、`finance`（財務）。
 
 登入後可查看帳號類別與角色。變更密碼須輸入目前密碼及 12–128 個 UTF-16 字元的新密碼；成功後全部舊登入失效，回登入頁使用新密碼。初始密碼檔不會隨變更更新。登出只撤銷本次登入；重新載入仍維持登出。
 
@@ -61,7 +61,9 @@ docker compose -p procurement-approval up --build -d
 
 ## 維護入口
 
-- [本機展示與保存](docs/local-demo.md)：前提、初始帳號、停止／重啟與資料保存。
+忘記管理員密碼時，可從本機執行 `recover-admin`，以新密碼登入並保留請購與設定。需要重新展示時，可執行 `sh reset-demo.sh`，核對目標並輸入完整確認句後，清除展示資料並取得新的示範帳號密碼。
+
+- [本機展示與保存](docs/local-demo.md) 說明初始帳號、停止／重啟、管理員復原與展示重設。
 - [前端開發](docs/frontend.md)：程式入口、DTO、狀態恢復與固定工具鏈。
 - [後端與 API](docs/backend.md)：身分規則、錯誤契約、交易及資料存取。
 - [測試](docs/testing.md)：隔離 HTTP／PostgreSQL 與瀏覽器驗證命令、覆蓋及限制。

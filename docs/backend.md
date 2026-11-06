@@ -15,9 +15,20 @@
 - `backend/RequisitionApprovalService.cs` 集中查閱授權、有效指派、資格、版本與關卡轉換。有限改派沿用組織服務的管理身分與交易邊界。`RequisitionRound.cs` 定義送審快照、歷程及資料庫約束。
 - `backend/RequisitionReporting.cs` 定義共用篩選、統計 DTO 與 CSV 編碼。`RequisitionApprovalService.cs` 用同一個可見查詢及最新送審範圍投影清單、統計及匯出。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
+- `backend/LocalMaintenance.cs` 負責本機 CLI 的管理員復原與展示重設。`Program.cs` 在啟動網站、套用 migration 或準備金鑰前分流這兩個命令。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
 HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交易內鎖定 `AspNetUsers` 對應帳號列，再檢查當下資料。管理帳號與業務帳號各有獨立資格。
+
+## 本機維護交易
+
+`recover-admin` 取得組織鎖與管理帳號列鎖後，重新確認固定 `admin` 的帳號類別、啟用狀態及管理角色。密碼雜湊、版本、鎖定狀態與舊登入撤銷沿用 `AuthService.ReplaceCredentials`，在同一交易提交。
+
+`reset-demo.sh` 固定本機 Docker Unix socket，核對 Compose 專案與工作目錄、實際容器、資料卷的名稱、擁有者及儲存選項，以及網站的本機映像。資料卷須為無自訂選項的本機卷，資料庫容器只掛載該卷與憑證目錄。維護程序以已核對的容器 ID 共用 `db` 網路命名空間，連線固定走 loopback 與 `procurement` 資料庫。命令在顯示目標前核對 PostgreSQL 18 的實際資料目錄 `/var/lib/postgresql/18/docker`、模型表清單與 migration。升級 PostgreSQL 時須核對實際資料目錄及重跑隔離重設。
+
+預覽讀取明列資料表的 PostgreSQL 行版本摘要。收到精確確認後，交易取得組織、migration 紀錄與目標資料表鎖，再比較版本摘要和目前資格。預覽後的資料異動會使確認失效。清空與重建示範帳號在同一交易。`TRUNCATE … RESTRICT` 會拒絕涉及清單外的外鍵，migration 紀錄保留。新增模型表時，須同步檢查清空範圍與重設測試。
+
+兩個命令都先將新密碼寫到受保護的本機檔案。Unix 執行時會同步憑證檔和目錄，再提交資料庫交易。提交結果不明時，操作人員可用候選憑證登入核對。操作步驟見[本機展示與保存](local-demo.md)。
 
 ## HTTP
 

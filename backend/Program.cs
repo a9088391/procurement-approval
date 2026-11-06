@@ -2,33 +2,30 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 using Procurement;
 
 // 同源入口只負責 HTTP 與組態；規則、交易與本機維護各有明確邊界。
+var command = args.FirstOrDefault();
+if (command is "recover-admin" or "reset-demo")
+{
+    // 復原和重設只開啟必要的資料庫交易，不經網站啟動、migration 或金鑰初始化。
+    Environment.ExitCode = await LocalMaintenance.Run(command, args.Length);
+    return;
+}
+
+// 一般網站與初始化命令沿用原有的啟動組態。
 var builder = WebApplication.CreateBuilder(args);
 var localDirectory = builder.Configuration["LocalDirectory"] ?? "/local";
 
 // 準備憑證不需啟動 HTTP 或連資料庫，供 Compose 在資料庫啟動前執行。
-if (args.FirstOrDefault() == "prepare-local")
+if (command == "prepare-local")
 {
     LocalSetup.Prepare(localDirectory);
     return;
 }
 
 // 優先採用環境組態的連線字串。展示容器缺少此組態時才讀本機受保護的密碼檔。
-var connection = builder.Configuration.GetConnectionString("Database");
-if (connection is null)
-{
-    var cs = new NpgsqlConnectionStringBuilder
-    {
-        Host = "db",
-        Database = "procurement",
-        Username = "procurement",
-        Password = File.ReadAllText(Path.Combine(localDirectory, "database-password"))
-    };
-    connection = cs.ConnectionString;
-}
+var connection = LocalSetup.DatabaseConnection(builder.Configuration, localDirectory);
 
 // 一般紀錄不包含 SQL 參數或 Data Protection 金鑰內容。
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
@@ -96,7 +93,7 @@ builder.Services.AddAntiforgery(options =>
     options.Cookie.SameSite = SameSiteMode.Strict;
 });
 
-// CLI 與網站共用 migration／初始化；維護命令完成後離開，不開放 HTTP 維護端點。
+// 網站與舊的初始化命令共用 migration；復原與重設已從獨立入口處理。
 var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
 {
@@ -105,18 +102,18 @@ await using (var scope = app.Services.CreateAsyncScope())
     await db.Database.MigrateAsync();
 
     // 只有明確命令或組態要求時才補帳號，避免一般啟動自行建立示範帳號。
-    if (args.FirstOrDefault() is "initialize-demo"
+    if (command is "initialize-demo"
         or "create-admin"
         || builder.Configuration.GetValue<bool>("InitializeDemo"))
         await LocalSetup.Initialize(
             db,
             scope.ServiceProvider.GetRequiredService<IPasswordHasher<AppUser>>(),
             localDirectory,
-            args.FirstOrDefault() == "create-admin");
+            command == "create-admin");
 }
 
 // 維護命令完成後直接結束程序，讓 CLI 呼叫端可接續下一步。
-if (args.FirstOrDefault() is "initialize-demo" or "create-admin")
+if (command is "initialize-demo" or "create-admin")
     return;
 
 // 將下游例外轉成一致的 API 回應，讓呼叫端辨識失敗並保護例外內容與請求資料。

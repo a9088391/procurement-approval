@@ -25,4 +25,6 @@ RUN npm run build
 
 # 單體以相同來源提供前端及 API，避免另外部署前端伺服器。
 FROM backend-runtime AS final
+# 維護腳本只使用含有目前重設入口的本機網站映像。
+LABEL io.procurement-approval.reset-demo="1"
 COPY --from=frontend-build /src/frontend/dist /app/wwwroot

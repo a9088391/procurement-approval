@@ -1,7 +1,10 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Win32.SafeHandles;
+using Npgsql;
 
 namespace Procurement;
 
@@ -9,6 +12,25 @@ namespace Procurement;
 public static class LocalSetup
 {
     public static readonly string[] Names = ["admin", "applicant", "manager", "finance"];
+
+    // 網站與本機復原共用原有連線選擇，讓明確設定優先於 Compose 展示資料庫。
+    internal static string DatabaseConnection(IConfiguration configuration, string directory) =>
+        configuration.GetConnectionString("Database") ?? new NpgsqlConnectionStringBuilder
+        {
+            Host = "db",
+            Database = "procurement",
+            Username = "procurement",
+            Password = File.ReadAllText(Path.Combine(directory, "database-password"))
+        }.ConnectionString;
+
+    // 重設只能讀取已存在的受保護資料庫密碼，預覽不能建立或更改本機資料。
+    internal static async Task<string> ReadDatabasePassword(string directory, CancellationToken ct)
+    {
+        // 沿用初始化的檔案檢查；讀不到符合條件的密碼就由呼叫端取消重設。
+        var path = Path.Combine(directory, "database-password");
+        CheckProtected(path);
+        return await File.ReadAllTextAsync(path, ct);
+    }
 
     // 建立本機資料目錄並限制目標目錄的 Unix 權限，以保護本機憑證。呼叫端須提供可信的上層路徑。
     public static void ProtectDirectory(string path)
@@ -61,7 +83,8 @@ public static class LocalSetup
                 stream.Flush(true);
             }
 
-            // 完整寫入後才讓正式路徑可見，並保留先前已存在的檔案。
+            // 完整寫入且確認權限後才讓正式路徑可見，並保留先前已存在的檔案。
+            CheckProtected(temporary);
             File.Move(temporary, path, false);
         }
         finally
@@ -71,6 +94,57 @@ public static class LocalSetup
                 File.Delete(temporary);
         }
     }
+
+    // 所有本機帳號憑證使用同樣的隨機來源，不接受命令列提供的密碼。
+    internal static Dictionary<string, string> GeneratePasswords(IEnumerable<string> names) =>
+        names.ToDictionary(name => name, _ => Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)));
+
+    // 每次復原或重設都保留獨立憑證檔，讓其他命令的輸出及初始密碼不會被覆寫。
+    internal static string WriteFreshAccounts(string directory, string prefix, Dictionary<string, string> passwords)
+    {
+        // 記錄需要同步的目錄，若這次建立路徑，也須保存各新目錄在其父目錄的項目。
+        directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        var syncPaths = new List<string> { directory };
+        var path = directory;
+        while (!Directory.Exists(path) && Path.GetDirectoryName(path) is { } parent)
+        {
+            syncPaths.Add(parent);
+            path = parent;
+        }
+
+        // 先保護目錄，再以唯一檔名發布已同步的檔案。
+        ProtectDirectory(directory);
+        var filename = prefix + "-" + Guid.NewGuid().ToString("N") + ".json";
+        WriteAccounts(Path.Combine(directory, filename), passwords);
+
+        // Unix 上依序從內往外同步目錄，確保檔名和新路徑保存後才允許資料庫提交。
+        if (!OperatingSystem.IsWindows())
+            foreach (var syncPath in syncPaths)
+                SyncDirectory(syncPath);
+        return filename;
+    }
+
+    // 以原生唯讀描述符同步目錄項目，任何失敗都會中止呼叫端的資料庫交易。
+    private static void SyncDirectory(string path)
+    {
+        // File.OpenHandle 不支援開啟目錄；由 SafeFileHandle 負責關閉原生描述符。
+        const int readOnly = 0;
+        using var handle = new SafeFileHandle((IntPtr)Open(path, readOnly), ownsHandle: true);
+        if (handle.IsInvalid || Fsync(handle) != 0)
+            throw new IOException("無法同步維護憑證目錄。");
+    }
+
+    // Unix 的 open 提供可交給 fsync 的唯讀目錄描述符。
+    [DllImport("libc", EntryPoint = "open", ExactSpelling = true)]
+    private static extern int Open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    // Unix 的 fsync 會回報目錄項目是否已同步。
+    [DllImport("libc", EntryPoint = "fsync", ExactSpelling = true)]
+    private static extern int Fsync(SafeFileHandle handle);
+
+    // 初始與維護命令共用既有 JSON 格式與安全寫入流程。
+    private static void WriteAccounts(string path, Dictionary<string, string> passwords) =>
+        WriteProtected(path, JsonSerializer.Serialize(passwords, new JsonSerializerOptions { WriteIndented = true }));
 
     // 檢查目標檔案項目及其 Unix 權限，讓重跑只沿用符合條件的檔案。上層路徑須可信。
     private static void CheckProtected(string path)
@@ -101,23 +175,28 @@ public static class LocalSetup
         // 憑證檔先保存，資料庫失敗後才能沿用同一組密碼重試，不把密碼寫到 console。
         var path = Path.Combine(directory, "initial-accounts.json");
         if (!File.Exists(path))
-        {
-            var generated = Names.ToDictionary(
-                n => n,
-                _ => Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)));
-            WriteProtected(path, JsonSerializer.Serialize(generated, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            }));
-        }
+            WriteAccounts(path, GeneratePasswords(Names));
 
         // 檢查目標憑證檔本身與 Unix 權限後才讀取。格式錯誤時停止，避免以無效資料建立帳號。
         CheckProtected(path);
         var passwords = JsonSerializer.Deserialize<Dictionary<string, string>>(await File.ReadAllTextAsync(path, ct))
             ?? throw new IOException("初始帳號檔案格式錯誤。");
 
-        // 依模式挑選需要補齊的帳號，只處理資料庫尚未存在的項目。
-        foreach (var name in adminOnly ? ["admin"] : Names)
+        // 播種和初始憑證沿用原有順序；管理員專用模式不新增業務帳號。
+        await SeedAccounts(db, hasher, passwords, adminOnly ? ["admin"] : Names, ct);
+        await tx.CommitAsync(ct);
+    }
+
+    // 呼叫端持有組織鎖與交易；初始化補齊帳號，重設則在清空後用同一套角色和規則重建。
+    internal static async Task SeedAccounts(
+        AuthDb db,
+        IPasswordHasher<AppUser> hasher,
+        Dictionary<string, string> passwords,
+        IEnumerable<string> names,
+        CancellationToken ct)
+    {
+        // 只處理資料庫尚未存在的帳號，初始化重跑不改舊憑證。
+        foreach (var name in names)
         {
             if (await db.Users.AnyAsync(u => u.NormalizedUserName == name.ToUpperInvariant(), ct))
                 continue;
@@ -154,8 +233,7 @@ public static class LocalSetup
             db.UserRoles.Add(new IdentityUserRole<string> { UserId = user.Id, RoleId = role.Id });
         }
 
-        // 所有帳號與角色處理完成後一次提交，任一步失敗都不留下部分新增。
+        // 一次儲存所有帳號與角色，由呼叫端在受保護輸出就緒後提交。
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
     }
 }

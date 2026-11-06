@@ -1,5 +1,50 @@
 # 測試與驗證
 
+## 管理員復原與展示重設
+
+CLI 復原的自動化案例由正式 `recover-admin` 子程序及 HTTP 驗證。測試使用下方的隔離 PostgreSQL，涵蓋解除鎖定、舊密碼和多個舊登入失效、新密碼可登入、業務登入保留，以及輸出失敗時回滾。
+
+```sh
+docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~SetupTests
+```
+
+### 隔離重設驗收
+
+在可拋棄的專案副本執行。使用專用 Compose 專案名稱、獨立資料卷及該副本的 `.local-browser/`，先核對 `127.0.0.1:5081` 可用。以下三個命令分別啟動、復原與要求重設。輸入確認前先完成資料準備及取消檢查。
+
+```sh
+docker compose -p procurement-approval-reset-test -f compose.yaml -f compose.browser.yaml up --build -d app
+docker compose -p procurement-approval-reset-test -f compose.yaml -f compose.browser.yaml run --rm --no-deps app recover-admin
+COMPOSE_FILE=compose.yaml:compose.browser.yaml sh reset-demo.sh procurement-approval-reset-test
+```
+
+1. 先在 `http://127.0.0.1:5081` 建立部門、預設審核人與一個額外業務帳號。由申請人送審、撤回、修改並重送，再由管理員改派，保存單號並記下可查的兩輪內容與完整歷程。停止並重啟網站和資料庫，核對原登入仍可讀取同一份資料。
+2. 以兩個瀏覽器工作階段登入 `admin`。執行復原命令後，重新載入兩個畫面，應回到登入表單。舊密碼應遭拒絕，新憑證可登入。用申請人的原登入重讀請購和歷程，再用新管理登入核對部門、帳號和改派設定。
+3. 在專用測試 PostgreSQL 中建立另一個資料庫，放入一筆可辨識的哨兵。執行重設後先檢查它顯示的專案、資料庫、清除範圍與無備份無法復原的訊息。按 Enter 取消。保持相同 Compose 專案，再執行一次並在提示後輸入錯誤的確認句，例如 `reset wrong-project/db/procurement`。這兩次結束後，重新讀回組織、請購與哨兵，均應保留。
+4. 再執行重設並依提示輸入精確確認句。從新的 `reset-accounts-*.json` 取得四個新密碼。舊登入、舊密碼及額外業務帳號應失效，新帳號可登入。用管理畫面確認部門及改派清單為空，以新申請人確認已知單號無法讀取。到非目標資料庫讀回相同哨兵，重啟後再用新憑證登入。
+
+### 重跑重設失敗路徑
+
+- **錯誤掛載**。在兩個可拋棄的 Compose 專案各建立資料卷和哨兵。另用測試覆寫建立一個錯掛其他測試卷的 `db` 容器，把該卷以唯讀方式掛在 `/var/lib/postgresql`，將容器入口改為 `sleep` 以防在錯掛卷啟動 PostgreSQL。用 `docker inspect` 核對容器的專案標籤和實際掛載後，針對錯掛的專案執行腳本。應在確認提示前回報資料卷不符。移除錯掛容器後，從原本兩個專案讀回各自的哨兵。
+- **同名卷與替代資料目錄**。使用可拋棄的測試卷複本，在測試覆寫中保留原卷名，但為本機卷加入指向複本的 bind `driver_opts`。另一個案例保留標準掛載，再將複本掛到 `/foreign`，設定 `PGDATA=/foreign/18/docker`。兩案都應在確認提示前被拒。用 `SHOW data_directory` 核對第二案的伺服器確實使用替代路徑，再從原專案讀回哨兵。
+- **過期確認**。在同一個隔離專案開啟兩個重設預覽，先完成其中一個，再送出另一個的確認句。第二次應被拒絕，第一次產生的密碼仍可登入。另開一次預覽，在另一個工作階段用 HTTP 新增部門並確認保存，再送出舊確認句。應回報資料變更並保留新增部門與原請購。
+- **鎖逾時**。讓腳本停在預覽。在專用測試庫的互動式 `psql` 執行 `SELECT pg_advisory_lock(80101);` 並保持連線。輸入正確確認句後，應回報等待鎖定逾時。結束 `psql` 釋放鎖，從網站重讀確認原資料保留。
+- **重建失敗回滾**。在專用測試庫加上下面的暫用 trigger，確認重設應回報失敗。用原管理密碼登入，再核對組織、兩輪快照及改派歷程完整。驗證後執行 `DROP TRIGGER reset_test_fail ON public."AspNetUsers"; DROP FUNCTION public.reset_test_fail();`，才能再驗證成功路徑。
+
+```sql
+CREATE FUNCTION public.reset_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'test seed failure';
+END;
+$$;
+CREATE TRIGGER reset_test_fail BEFORE INSERT ON public."AspNetUsers"
+FOR EACH ROW EXECUTE FUNCTION public.reset_test_fail();
+```
+
+2026-11-06 在 macOS ARM64、Compose 5.5.0 和 PostgreSQL 18.6 實測。修正前後的 Release HTTP 回歸各 **185／185**。Chromium 1.64.1 的既有回歸 **35／35** 通過，並以最終映像定向複驗實際復原與重設。兩次都看到舊登入回到登入表單、舊密碼遭拒、新密碼可登入。鎖定套件還原、Release 建置、.NET 格式、EF 模型一致性、TypeScript、Vite、Prettier 與 Shell 語法檢查均通過。
+
+在專用資料卷從上一版原地升級，經 HTTP 核對組織設定、請購、兩輪快照與改派歷程。按 Enter、錯誤確認、非目標連線、錯掛測試卷與鎖逾時均保留資料。同名卷轉接和替代 `PGDATA` 都在確認前被拒，切換 Docker context 的模擬也證明後續命令使用同一個已核對的 socket。注入重建失敗時整筆交易回滾。另一個重設或新增部門先提交時，先前的確認句會失效。確認清空後四個新示範帳號可登入，非目標資料庫的哨兵仍可讀取，重啟後再核對新登入與清空結果。
+
 ## 請購統計與 CSV
 
 使用下方的隔離 [HTTP 與資料庫](#http-與資料庫) 及 [瀏覽器](#前端與瀏覽器) 環境。可定向執行報表案例。
