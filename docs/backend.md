@@ -1,6 +1,6 @@
 # 後端與 API 契約
 
-目前提供本機登入、密碼變更、部門及業務帳號管理，以及本人請購草稿、固定兩關簽核與分權查閱。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
+目前提供本機登入、密碼變更、部門及業務帳號管理，以及本人請購草稿、固定兩關簽核、分權查閱與有限改派。後端以 ASP.NET Core 10 單體提供同源 API 與編譯後的前端，PostgreSQL 為獨立容器。
 
 ## 入口與責任
 
@@ -11,8 +11,8 @@
 - `backend/OrganizationEndpoints.cs`、`OrganizationModel.cs`、`OrganizationService.cs` 負責管理路由、部門與管理 DTO，以及設定資格、驗證、版本和交易。
 - `backend/RequisitionDraftEndpoints.cs` 及 `RequisitionDraftContracts.cs` 定義草稿 Minimal API 及 DTO。
 - `backend/RequisitionDraftService.cs` 集中本人草稿查詢、版本和交易。`RequisitionDraftInput.cs` 驗證內容及計算金額，`Requisition.cs` 定義主檔、明細及 EF 對應。
-- `backend/RequisitionApprovalEndpoints.cs` 與 `RequisitionApprovalContracts.cs` 定義簽核和查閱 API 及公開 DTO。
-- `backend/RequisitionApprovalService.cs` 集中查閱授權、資格、版本與關卡轉換。`RequisitionRound.cs` 定義送審快照、歷程及資料庫約束。
+- `backend/RequisitionApprovalEndpoints.cs` 與 `RequisitionApprovalContracts.cs` 定義簽核、查閱與有限改派 API 及公開 DTO。
+- `backend/RequisitionApprovalService.cs` 集中查閱授權、有效指派、資格、版本與關卡轉換。有限改派沿用組織服務的管理身分與交易邊界。`RequisitionRound.cs` 定義送審快照、歷程及資料庫約束。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
@@ -103,17 +103,30 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | `POST /api/requisitions/{id}/approve` | `version` | `200`，主管核准進入財務待審，財務核准後結案 |
 | `POST /api/requisitions/{id}/reject` | `version` | `200`，目前關卡駁回結案 |
 
-清單項目包含 `id`、`number`、`subject`、`applicant`、`status`、`estimatedAmount`、`version`、`createdAt`、`updatedAt`、`paused`、`canDecide` 與 `round`。人員資料含 `id`、`userName`。`round` 含 `number`、`department`（`id`、`name`）、`submittedAt`、`manager`、`finance`，表示最近一次送審。從未送審時為 `null`。
+清單項目包含 `id`、`number`、`subject`、`applicant`、`status`、`estimatedAmount`、`version`、`createdAt`、`updatedAt`、`paused`、`canDecide` 與 `round`。人員資料含 `id`、`userName`。`round` 含 `number`、`department`（`id`、`name`）、`submittedAt`、`manager`、`finance`，表示最近一次送審的部門與有效指派。從未送審時為 `null`。
 
-明細及 POST 成功回應另含 `purpose`、`lines`、`isComplete`、`canSubmit`、`canWithdraw`、`history` 與 `previousRounds`。撤回修改期間，頂層欄位呈現目前保存的可編輯內容。`previousRounds` 每筆含 `round`、`subject`、`purpose`、`estimatedAmount` 及 `lines`。申請人會在這裡取得先前快照，撤回修改期間也包含剛撤回的一輪。其他帳號取得空陣列。
+明細及 POST 成功回應另含 `purpose`、`lines`、`isComplete`、`canSubmit`、`canWithdraw`、`history` 與 `previousRounds`。撤回修改期間，頂層欄位呈現目前保存的可編輯內容。`previousRounds` 每筆含 `round`、`subject`、`purpose`、`estimatedAmount` 及 `lines`。申請人會在這裡取得先前快照的原始人選，撤回修改期間也包含剛撤回的一輪。其他帳號取得空陣列。
 
-歷程每筆含 `roundNumber`、`kind`、`stage`、`actor` 及 `occurredAt`。送審和撤回事件的 `kind` 分別為 `submitted` 和 `withdrawn`，`stage` 為 `null`。決定的 `kind` 為 `approved` 或 `rejected`，`stage` 為 `manager` 或 `finance`。
+歷程每筆含 `roundNumber`、`kind`、`stage`、`actor` 及 `occurredAt`。送審和撤回事件的 `kind` 分別為 `submitted` 和 `withdrawn`，`stage` 為 `null`。決定的 `kind` 為 `approved` 或 `rejected`，`stage` 為 `manager` 或 `finance`。改派的 `kind` 為 `reassigned`，沿用相同關卡值，另含 `reassignment`，其中 `previousReviewer`、`newReviewer` 為人員資料，`reason` 為交接原因。
 
 狀態為 `draft`、`withdrawn`、`manager_pending`、`finance_pending`、`approved` 或 `rejected`。資格阻礙以 `paused` 標示，請購維持原待審狀態。主管待審時兩個尚未完成的關卡都須有合格審核人。主管作成決定後，案件進入財務關時只重查未完成的財務指派。暫停不改變首次決定前可撤回的條件。
 
-本人可查閱自己的全部請購。只有本人可查草稿與撤回修改中的單，也只有本人可查舊輪次。主管可查目前部門審核中或已結案的單及最新一輪指派給本人的單。財務以最新一輪的主管核准事件判斷是否已進財務關。角色範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。其他業務帳號獲准時只會取得最新一輪的資料與歷程。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
+本人可查閱自己的全部請購。只有本人可查草稿與撤回修改中的單，也只有本人可查舊輪次。主管可查目前部門審核中或已結案的單及最新一輪有效指派給本人的單。財務以最新一輪的主管核准事件判斷是否已進財務關。角色範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。其他業務帳號獲准時只會取得最新一輪的資料與歷程。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
 
 送審和重送都重新驗證本人已保存的可編輯內容、申請人部門及兩位預設審核人的資格。送審部門採當次既有歸屬，部門停用保留歷史關聯。舊帳號尚未分配部門時，系統保留目前內容，管理員先補上部門才可送審。寫入只接受目前版本，欄位、狀態及指派都由伺服器決定。版本過期、狀態不符或資格不足時保留資料，請依回應讀回最新明細。回應遺失或收到 500 時應先讀回，避免重複提交。
+
+## 有限改派 API
+
+限具 `Administrator` 角色且已完成改密碼要求的有效管理帳號。GET 可用有效 Cookie，附 `X-CSRF-TOKEN` 時須與 Cookie 配對。管理畫面讀寫都附上配對權杖。
+
+| 端點 | 請求本文 | 成功 |
+| --- | --- | --- |
+| `GET /api/admin/reassignments` | 無 | `200`，有限待辦 `items` 與具對應資格的候選人 `managers`、`finances` |
+| `POST /api/admin/reassignments/{id}` | `version`、`stage`、`reviewerId`、`reason` | `204`，改派完成後以 GET 讀回目前指派 |
+
+待辦項目只有識別 `id`、單號 `number`、`department`（`id`、`name`）、目前待審關卡 `stage`（`manager` 或 `finance`）、`paused`、`version`、目前人選 `manager`、`finance`。兩位人選與候選清單只含 `id`、`userName`。清單只含當輪待審案件。回應及錯誤皆不包含主旨、用途、明細、金額或申請人欄位。
+
+寫入以指定關卡替換單一人選。候選人須是啟用且具對應角色的業務帳號，並與申請人、另一關審核人及該關目前人選不同。原因去除首尾空白後須有 1–500 個 UTF-16 碼元，禁止 NUL。錯誤使用既有 `code`／`message` 形狀。`400 invalid_input` 表示本文不符契約，`404 not_found` 表示該單不在有限待辦範圍，`409 stale_version`、`invalid_state`、`reviewers_unavailable` 分別表示過期、關卡已完成、人選不合格。回應遺失時，GET 只可核對目前指派，無法單憑現值判定先前請求是否提交。
 
 ## 安全及一致性
 
@@ -129,7 +142,7 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 草稿服務鎖定操作者的帳號列，重查當下的登入與業務資格。同一帳號的草稿版本檢查、寫入和撤權依此列鎖的交易提交順序生效。保存會在同一交易取代有順序的明細、更新主檔與該次登入活動時間。交易內任一步失敗都會回滾。刪除主檔時 PostgreSQL 外鍵會同步刪除該草稿明細。
 
-送審、撤回及簽核沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓撤回、保存與重送依序生效。撤回與首關決定競爭時，先提交的結果會使落後操作的版本、狀態或可見範圍失效。每次寫入在同一筆交易保存狀態、版本及歷程，送審時同時保存新快照。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
+送審、撤回、簽核及有限改派沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓撤回、保存與重送依序生效。撤回與首關決定競爭時，先提交的結果會使落後操作的版本、狀態或可見範圍失效。每次寫入在同一筆交易保存狀態、版本及歷程，送審時同時保存新快照。改派在同一筆交易保存有效指派、請購版本與改派歷程，原待審關卡及原快照保留。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
 
 ## 固定工具鏈與開發
 
@@ -148,3 +161,5 @@ docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests 
 簽核遷移新增 `RequisitionRounds` 與 `RequisitionApprovalEvents`，舊草稿沿用原狀態與版本。輪次以 JSONB 保存當次內容與順序，部門與指派保留關聯，部門名稱採送審當時的快照。套用降版會移除輪次及歷程表，且不能把已送審的請購還原成舊版草稿。需回到升級前的狀態時，使用升級前備份及相符的應用版本。
 
 撤回遷移調整操作歷程的種類及唯一性約束，保留既有草稿、輪次及事件。資料庫限制每輪最多一筆送審、一筆撤回，以及每個審核關卡最多一筆決定。已有撤回歷程時，舊版約束無法接納現有資料。要回到升級前的資料狀態，須使用升級前的備份和相符的應用版本。
+
+`RequisitionReassignment` 保留舊輪次及事件，新增有效指派欄位及改派歷程欄位。兩關目前人選、歷程前後人選及原快照均保有資料庫關聯，資料庫仍限制每關最多一筆決定。已有改派事件時，退回舊 schema 的遷移會遭資料庫拒絕並回滾。請搭配支援改派的程式及 schema，舊版程式依原始人選判斷簽核權。回到升級前的資料狀態需使用升級前備份與相符的應用版本。

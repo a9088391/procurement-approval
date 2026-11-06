@@ -364,8 +364,18 @@ namespace Procurement.Api.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("NewReviewerId")
+                        .HasColumnType("text");
+
                     b.Property<DateTimeOffset>("OccurredAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PreviousReviewerId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<Guid>("RequisitionId")
                         .HasColumnType("uuid");
@@ -381,16 +391,25 @@ namespace Procurement.Api.Migrations
 
                     b.HasIndex("ActorId");
 
+                    b.HasIndex("NewReviewerId");
+
+                    b.HasIndex("PreviousReviewerId");
+
+                    b.HasIndex("RequisitionId", "RoundNumber");
+
                     b.HasIndex("RequisitionId", "RoundNumber", "Kind")
                         .IsUnique()
                         .HasFilter(" \"Stage\" IS NULL ");
 
                     b.HasIndex("RequisitionId", "RoundNumber", "Stage")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter(" \"Kind\" IN ('approved', 'rejected') ");
 
                     b.ToTable("RequisitionApprovalEvents", null, t =>
                         {
-                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_KindStage", "(\"Kind\" IN ('submitted', 'withdrawn') AND \"Stage\" IS NULL) OR\n(\"Kind\" IN ('approved', 'rejected') AND \"Stage\" IS NOT NULL AND \"Stage\" IN ('manager', 'finance'))");
+                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_KindStage", "(\"Kind\" IN ('submitted', 'withdrawn') AND \"Stage\" IS NULL) OR\n(\"Kind\" IN ('approved', 'rejected', 'reassigned') AND \"Stage\" IS NOT NULL AND \"Stage\" IN ('manager', 'finance'))");
+
+                            t.HasCheckConstraint("CK_RequisitionApprovalEvents_Reassignment", "(\"Kind\" = 'reassigned'\n    AND \"PreviousReviewerId\" IS NOT NULL AND \"NewReviewerId\" IS NOT NULL\n    AND \"PreviousReviewerId\" <> \"NewReviewerId\" AND \"Reason\" IS NOT NULL AND length(\"Reason\") > 0) OR\n(\"Kind\" <> 'reassigned' AND \"PreviousReviewerId\" IS NULL AND \"NewReviewerId\" IS NULL AND \"Reason\" IS NULL)");
                         });
                 });
 
@@ -447,8 +466,14 @@ namespace Procurement.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("FinanceReplacementId")
+                        .HasColumnType("text");
+
                     b.Property<string>("ManagerId")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ManagerReplacementId")
                         .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("SubmittedAt")
@@ -460,10 +485,16 @@ namespace Procurement.Api.Migrations
 
                     b.HasIndex("FinanceId");
 
+                    b.HasIndex("FinanceReplacementId");
+
                     b.HasIndex("ManagerId");
+
+                    b.HasIndex("ManagerReplacementId");
 
                     b.ToTable("RequisitionRounds", null, t =>
                         {
+                            t.HasCheckConstraint("CK_RequisitionRounds_DistinctEffectiveReviewers", " COALESCE(\"ManagerReplacementId\", \"ManagerId\") <> COALESCE(\"FinanceReplacementId\", \"FinanceId\") ");
+
                             t.HasCheckConstraint("CK_RequisitionRounds_DistinctReviewers", " \"ManagerId\" <> \"FinanceId\" ");
                         });
                 });
@@ -563,6 +594,16 @@ namespace Procurement.Api.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("Procurement.AppUser", "NewReviewer")
+                        .WithMany()
+                        .HasForeignKey("NewReviewerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Procurement.AppUser", "PreviousReviewer")
+                        .WithMany()
+                        .HasForeignKey("PreviousReviewerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Procurement.RequisitionRound", null)
                         .WithMany("History")
                         .HasForeignKey("RequisitionId", "RoundNumber")
@@ -570,6 +611,10 @@ namespace Procurement.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("Actor");
+
+                    b.Navigation("NewReviewer");
+
+                    b.Navigation("PreviousReviewer");
                 });
 
             modelBuilder.Entity("Procurement.RequisitionLine", b =>
@@ -595,11 +640,21 @@ namespace Procurement.Api.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("Procurement.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("FinanceReplacementId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Procurement.AppUser", "Manager")
                         .WithMany()
                         .HasForeignKey("ManagerId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("Procurement.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("ManagerReplacementId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("Procurement.Requisition", null)
                         .WithMany("Rounds")

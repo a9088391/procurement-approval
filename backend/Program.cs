@@ -196,13 +196,14 @@ app.Use(async (http, next) =>
         return;
     }
 
-    // 請購 GET 若附上權杖，須與當次 Cookie 身分一致，避免共用 Cookie 的舊頁讀到另一帳號的資料。
-    var requisitionReadWithToken = HttpMethods.IsGet(http.Request.Method)
-        && requestPath.StartsWithSegments("/api/requisitions")
+    // 請購與改派 GET 若附上權杖，須與當次 Cookie 身分一致，避免舊頁讀到另一帳號的資料。
+    var pairedRead = HttpMethods.IsGet(http.Request.Method)
+        && (requestPath.StartsWithSegments("/api/requisitions")
+            || requestPath.StartsWithSegments("/api/admin/reassignments"))
         && http.Request.Headers.ContainsKey(AuthEndpoints.CsrfHeaderName);
 
-    // 所有 API POST 都要求權杖，直接使用 Cookie 的請購 GET 仍可省略標頭。
-    if ((api && post) || requisitionReadWithToken)
+    // 所有 API POST 都要求權杖，直接使用 Cookie 的受配對保護 GET 可省略標頭。
+    if ((api && post) || pairedRead)
     {
         try
         {

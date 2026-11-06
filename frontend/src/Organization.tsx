@@ -16,7 +16,9 @@ interface Props {
   pending: boolean;
   beginOperation: () => boolean;
   finishOperation: () => void;
-  onSessionInvalid: (notice: string, confirmedWrite?: string) => void;
+  onSessionInvalid: (notice: string) => void;
+  confirmedWrite: string;
+  onConfirmedWriteChange: (label: string | null) => void;
   unknownResult: boolean;
   onUnknownResult: () => void;
 }
@@ -41,20 +43,26 @@ export function Organization({
   beginOperation,
   finishOperation,
   onSessionInvalid,
+  confirmedWrite,
+  onConfirmedWriteChange,
   unknownResult,
   onUnknownResult,
 }: Props) {
-  // 讀回成功前保留原快照供檢視；需要重讀時停用所有寫入與選擇控制。
+  // 帶著未完成的保存確認掛載時只提供手動讀回，不載入舊快照或表單。
+  const [loadOnMount] = useState(!confirmedWrite);
+  const [requiresRead, setRequiresRead] = useState(!loadOnMount);
   const [readback, setReadback] = useState<{
     snapshot: OrganizationDto;
     revision: number;
   } | null>(null);
-  const [requiresRead, setRequiresRead] = useState(false);
   const [notice, setNotice] = useState<{
     text: string;
     error: boolean;
-    confirmedWrite?: string;
-  } | null>(null);
+  } | null>(
+    confirmedWrite
+      ? { text: `${confirmedWrite}。請重新讀取組織設定。`, error: true }
+      : null,
+  );
   const feedback = useRef<HTMLDivElement>(null);
 
   // 初始讀取、手動重讀及保存後讀回使用同一條錯誤恢復路徑。
@@ -80,6 +88,8 @@ export function Organization({
             : "已讀取目前設定。",
           error: false,
         });
+        // 讀回成功才清除這筆已確認保存的待讀回標記；畫面仍顯示本次結果。
+        if (confirmedWrite) onConfirmedWriteChange(null);
       } catch (error) {
         // 保留已確認的寫入狀態，不能把接續讀取失敗解讀為未保存。
         if (signal?.aborted) return;
@@ -87,11 +97,8 @@ export function Organization({
           ? `${confirmedWrite}，但無法讀回設定。`
           : "";
         if (requiresSessionCheck(error)) {
-          // 分別交給 App 保存確認及錯誤指引，恢復身分時只移除指引。
-          onSessionInvalid(
-            `${prefix}${error.message} 請重新確認身分。`,
-            confirmedWrite,
-          );
+          // 恢復區只顯示重驗指引；保存確認由 App 留給原帳號。
+          onSessionInvalid(`${error.message} 請重新確認身分。`);
           return;
         }
 
@@ -100,17 +107,16 @@ export function Organization({
         setNotice({
           text: `${prefix || "無法讀取組織設定。"}請重新讀取組織設定。`,
           error: true,
-          confirmedWrite,
         });
       }
     },
-    [onSessionInvalid],
+    [onConfirmedWriteChange, onSessionInvalid],
   );
 
-  // 首次掛載只執行 GET；同一輪驗證完成前禁止切換身分或開始寫入。
+  // 一般掛載只執行 GET；若已有保存等待讀回，改由使用者觸發同一流程。
   useEffect(() => {
     // 共用閘門只由持有它的操作釋放，卸載會取消讀取而不覆蓋較新的狀態。
-    if (!beginOperation()) return;
+    if (!loadOnMount || !beginOperation()) return;
     const controller = new AbortController();
     let waiting = true;
     void loadSettings("", controller.signal).finally(
@@ -129,7 +135,7 @@ export function Organization({
       waiting = false;
       finishOperation();
     };
-  }, [beginOperation, finishOperation, loadSettings]);
+  }, [beginOperation, finishOperation, loadOnMount, loadSettings]);
 
   // 重讀只發出 GET；未知寫入提示獨立保留，不因讀到一份快照而宣告寫入成功。
   async function reload() {
@@ -139,7 +145,7 @@ export function Organization({
 
     // 完成這輪讀取後才允許下一個身分或組織操作。
     try {
-      await loadSettings(notice?.confirmedWrite);
+      await loadSettings(confirmedWrite);
     } finally {
       finishOperation();
     }
@@ -170,6 +176,7 @@ export function Organization({
       await write;
 
       // 204 已確認保存；等讀回成功才重建表單，期間不允許重複送出。
+      onConfirmedWriteChange(confirmation);
       await loadSettings(confirmation);
     } catch (error) {
       // 身分或權杖不可用時立刻移除設定，防止舊資料在恢復期間可見。

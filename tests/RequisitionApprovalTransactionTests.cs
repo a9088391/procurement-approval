@@ -252,7 +252,7 @@ public sealed class RequisitionApprovalTransactionTests
     }
 
     // 觀察 PostgreSQL 交易實際等候組織鎖，可在第二筆入列前先確認第一筆。
-    private static async Task WaitForApprovalLockWaiters(NpgsqlConnection observer, int count = 2)
+    internal static async Task WaitForApprovalLockWaiters(NpgsqlConnection observer, int count = 2)
     {
         // 只計目前測試庫內正在等待同一個 advisory lock 的請求。
         await using var query = new NpgsqlCommand("""

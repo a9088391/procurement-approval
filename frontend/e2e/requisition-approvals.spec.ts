@@ -8,7 +8,11 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
-import type { OrganizationDto, RequisitionDetailDto } from "../src/api";
+import type {
+  OrganizationDto,
+  ReassignmentListDto,
+  RequisitionDetailDto,
+} from "../src/api";
 
 const baseURL = process.env.BASE_URL;
 
@@ -199,21 +203,24 @@ test.afterEach(() => {
 });
 
 // 使用真實登入表單並只在瀏覽器內輸入密碼，避免 fill 失敗時輸出秘密。
-async function login(page: Page, role: Role) {
-  await page.getByLabel("帳號", { exact: true }).fill(actorName(role));
+async function login(page: Page, role: Role | "admin") {
+  // 管理登出案例也走同一個登入表單與密碼遮蔽路徑。
+  const name = role === "admin" ? "admin" : actorName(role);
+  const password = role === "admin" ? demoAccounts.admin : finalPassword;
+  await page.getByLabel("帳號", { exact: true }).fill(name);
   await page.getByLabel("密碼", { exact: true }).evaluate(
     // 保留實際輸入事件，同時避免密碼出現在 Playwright 動作診斷。
     (element, password) => {
       (element as HTMLInputElement).value = password;
       element.dispatchEvent(new Event("input", { bubbles: true }));
     },
-    finalPassword,
+    password,
   );
   await page.getByRole("button", { name: "登入", exact: true }).click();
   await expect(
     page
       .getByRole("region", { name: "目前身分" })
-      .getByText(actorName(role), { exact: true }),
+      .getByText(name, { exact: true }),
   ).toBeVisible();
 }
 
@@ -321,9 +328,14 @@ async function checkLayout(
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
-    for (const button of await region.getByRole("button").all()) {
+    const controls = await region
+      .getByRole("button")
+      .or(region.getByRole("combobox"))
+      .or(region.getByRole("textbox"))
+      .all();
+    for (const control of controls) {
       // 確認每個互動控制項都在有效的水平範圍內。
-      const box = await button.boundingBox();
+      const box = await control.boundingBox();
       expect(box !== null && box.x >= 0 && box.x + box.width <= width).toBe(
         true,
       );
@@ -1344,6 +1356,554 @@ test("跨分頁換成須改密碼帳號後，簽核 403 移除舊身分與請購
     await admin.dispose();
     await applicant.dispose();
   }
+});
+
+// 只更動本輪合成主管的角色，使用真實管理版本並在個案結束後恢復。
+async function setFixtureManagerRole(
+  admin: APIRequestContext,
+  isManager: boolean,
+) {
+  // 先讀取目前版本與設定，避免覆寫角色以外的帳號欄位。
+  const snapshot = await admin.get("/api/admin/organization");
+  expect(snapshot.status()).toBe(200);
+  const { accounts }: OrganizationDto = await snapshot.json();
+  const account = accounts.find(
+    // 只使用本輪建立的主管，不動預載示範角色。
+    ({ userName }) => userName === actorName("manager"),
+  );
+  if (!account) throw new Error("簽核測試主管未完整建立。");
+
+  // 更新資格仍走正式管理操作與防偽檢查。
+  const response = await admin.post(`/api/admin/accounts/${account.id}`, {
+    headers: { "X-CSRF-TOKEN": await csrf(admin) },
+    data: {
+      version: account.version,
+      active: account.active,
+      isManager,
+      isFinance: account.isFinance,
+      departmentId: account.departmentId,
+      managerReviewerId: account.managerReviewerId,
+      financeReviewerId: account.financeReviewerId,
+    },
+  });
+  expect(response.status()).toBe(204);
+}
+
+// 等待目前角色可用的管理入口，切換後保留相同 locator 供面板卸載斷言。
+async function reassignments(page: Page) {
+  const entry = page.getByRole("button", { name: "有限改派", exact: true });
+  await expect(entry).toBeVisible();
+  await entry.click();
+  const panel = page.getByRole("region", { name: "有限改派" });
+  await expect(panel).toBeVisible();
+  return panel;
+}
+
+// 管理端只用系統單號找案件，原始請購主旨永遠不作為管理端 locator。
+function reassignmentRow(panel: Locator, number: string) {
+  return panel.getByRole("listitem").filter({
+    has: panel.page().getByRole("button", { name: number, exact: true }),
+  });
+}
+
+// 開啟指定單的表單並檢查焦點，避免背景讀取後遺失鍵盤位置。
+async function editReassignment(row: Locator, number: string) {
+  await row.getByRole("button", { name: number, exact: true }).click();
+  await expect(
+    row.getByRole("heading", { name: `改派 ${number}` }),
+  ).toBeFocused();
+  return row.getByRole("form", { name: `改派 ${number}` });
+}
+
+// 從管理員入口驗證有限欄位、分關角色、暫停到續辦，以及業務端實際保存的歷程。
+test("有限改派只向管理員顯示待辦所需資訊，資格恢復後保留歷程", async ({
+  page,
+  browser,
+}) => {
+  // 分別登入管理員與申請人；送審後撤掉本輪主管資格，製造可復原的暫停。
+  const subject = `有限改派測試-${runId}`;
+  const business = await browser.newContext();
+  const applicantPage = await business.newPage();
+  await apiLogin(page.request, "admin", demoAccounts.admin);
+  await page.reload();
+  await expect(page).toHaveTitle(/請購簽核/);
+  await expect(page).toHaveURL(new URL("/", baseURL).href);
+  const applicant = await openActor(applicantPage, "applicant");
+  const { number, id } = await seedPending(applicantPage.request, subject);
+  const reloadBusiness = applicant.getByRole("button", {
+    name: "重新讀取請購列表",
+  });
+  await reloadBusiness.click();
+  await openApproval(applicant, subject);
+  await expect(
+    applicantPage.getByRole("button", { name: "有限改派", exact: true }),
+  ).toHaveCount(0);
+  await setFixtureManagerRole(page.request, false);
+
+  try {
+    // 申請人重讀仍保留主管待審，管理員只見單號、送審部門、狀態與兩關人選。
+    await applicant.getByRole("button", { name: "返回請購列表" }).click();
+    await openApproval(applicant, subject);
+    await expect(applicant.getByRole("alert")).toContainText(
+      "簽核已暫停，保留目前關卡",
+    );
+    await expect(
+      applicant.getByText("主管待審", { exact: true }),
+    ).toBeVisible();
+    const panel = await reassignments(page);
+    const row = reassignmentRow(panel, number);
+    await expect(row).toBeVisible();
+    for (const value of [
+      departmentName,
+      "主管待審",
+      "簽核已暫停",
+      actorName("manager"),
+      actorName("finance"),
+    ]) {
+      // 每一個有限欄位都從指定待辦的摘要查證。
+      await expect(row.getByText(value, { exact: true })).toBeVisible();
+    }
+    for (const value of [
+      subject,
+      "驗證操作讀回",
+      "測試品項",
+      "預估申請金額",
+      "主旨",
+      "整單用途",
+      "請購明細",
+    ]) {
+      // 已知測試單的私密欄位和值皆不可顯示。
+      await expect(panel).not.toContainText(value);
+    }
+
+    // 鍵盤可到兩關選單與原因欄；手機和桌機不裁切關鍵表單控制項。
+    const form = await editReassignment(row, number);
+    const stage = form.getByLabel("改派關卡");
+    const reviewer = form.getByLabel("接手審核者");
+    const reason = form.getByLabel("改派原因");
+    await page.keyboard.press("Tab");
+    await expect(stage).toBeFocused();
+    await expect(stage.locator("option")).toHaveText(["主管", "財務"]);
+    await expect(
+      reviewer.getByRole("option", { name: "manager", exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      reviewer.getByRole("option", { name: "finance", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      reviewer.getByRole("option", { name: actorName("manager"), exact: true }),
+    ).toHaveCount(0);
+    await stage.selectOption("finance");
+    await expect(
+      reviewer.getByRole("option", { name: "manager", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      reviewer.getByRole("option", { name: actorName("finance"), exact: true }),
+    ).toHaveCount(0);
+    await checkLayout(page, row, departmentName, "reassignment");
+
+    // 只有白字元及過長的 UTF-16 原因在前端拒絕，焦點回到原欄位。
+    const save = form.getByRole("button", { name: "保存改派" });
+    let posts = 0;
+    page.on("request", (request) => {
+      // 只計本案寫入次數，不收集請求資料。
+      if (
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/admin/reassignments/${id}`)
+      )
+        posts++;
+    });
+    await reviewer.selectOption({ label: "finance" });
+    await reason.fill("\u0085 \u3000");
+    await save.click();
+    await expect(panel.getByRole("alert")).toContainText(
+      "請填寫 1–500 字的改派原因",
+    );
+    await expect(reason).toBeFocused();
+    await reason.fill("📝".repeat(251));
+    await save.click();
+    await expect(reason).toBeFocused();
+    expect(posts).toBe(0);
+
+    // 模擬伺服器的明確輸入拒絕，確認安全輸入和選項可在原表單修正。
+    await page.route(
+      `**/api/admin/reassignments/${id}`,
+      async (route) => {
+        // 後端驗證的真實 HTTP 案例另有測試；此處只演練 UI 收到拒絕的分支。
+        await route.fulfill({
+          status: 400,
+          json: { code: "invalid_input", message: "請修正改派原因。" },
+        });
+      },
+      { times: 1 },
+    );
+    await reason.fill("保留這段理由");
+    await save.click();
+    await expect(panel.getByRole("alert")).toHaveText("請修正改派原因。");
+    await expect(reason).toHaveValue("保留這段理由");
+    await expect(reviewer.locator("option:checked")).toHaveText("finance");
+
+    // 先改派財務，確認主管仍待審且未恢復；前後空白依後端規則正規化。
+    await reason.fill("\u0085\uFEFF財務接手\u3000");
+    await save.click();
+    await expect(
+      panel.getByRole("status").filter({ hasText: "改派已保存" }),
+    ).toBeVisible();
+    await expect(row.getByText("簽核已暫停", { exact: true })).toBeVisible();
+    await expect(row.getByText("主管待審", { exact: true })).toBeVisible();
+    await expect(row.getByText("finance", { exact: true })).toBeVisible();
+
+    // 再改派原待審關卡後，已恢復資格仍停在主管待審，由新人處理。
+    await editReassignment(row, number);
+    await reviewer.selectOption({ label: "manager" });
+    await reason.fill("主管接手");
+    await save.click();
+    await expect(
+      panel.getByRole("status").filter({ hasText: "改派已保存" }),
+    ).toBeVisible();
+    await expect(row.getByText("簽核已暫停", { exact: true })).toHaveCount(0);
+    await expect(
+      panel.getByRole("heading", { name: "有限改派" }),
+    ).toBeFocused();
+    await expect(row.getByText("主管待審", { exact: true })).toBeVisible();
+    await expect(row.getByText("manager", { exact: true })).toBeVisible();
+    expect(posts).toBe(3);
+
+    // 在業務畫面核對同輪的前後人選、原因、管理操作者與時間，內容仍取自原快照。
+    await applicant.getByRole("button", { name: "返回請購列表" }).click();
+    await openApproval(applicant, subject);
+    await history(applicant, [
+      `送出簽核 · ${actorName("applicant")}`,
+      "第 1 輪 · 財務改派 · admin",
+      "第 1 輪 · 主管改派 · admin",
+    ]);
+    const events = applicant
+      .getByRole("list", { name: "操作歷程" })
+      .getByRole("listitem");
+    await expect(events.nth(1)).toContainText(actorName("finance"));
+    await expect(events.nth(1)).toContainText("財務接手");
+    await expect(events.nth(2)).toContainText(actorName("manager"));
+    await expect(events.nth(2)).toContainText("主管接手");
+    await expect(
+      applicant.getByText("驗證操作讀回", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      applicant.getByText("測試品項", { exact: true }),
+    ).toBeVisible();
+    const detail = await applicantPage.request.get(`/api/requisitions/${id}`, {
+      headers: { "X-CSRF-TOKEN": await csrf(applicantPage.request) },
+    });
+    expect(detail.status()).toBe(200);
+    const persisted: RequisitionDetailDto = await detail.json();
+    expect(persisted.history[1].reassignment?.reason).toBe("\uFEFF財務接手");
+
+    // 新主管的正常簽核推進到財務關；管理面板此後只能選未完成的財務關。
+    await apiLogin(applicantPage.request, "manager", demoAccounts.manager);
+    await applicantPage.reload();
+    const newManager = await approvals(applicantPage);
+    await openApproval(newManager, subject);
+    await newManager.getByRole("button", { name: "核准", exact: true }).click();
+    await expect(
+      newManager.getByText("財務待審", { exact: true }),
+    ).toBeVisible();
+    await panel.getByRole("button", { name: "重新讀取改派待辦" }).click();
+    await expect(row.getByText("財務待審", { exact: true })).toBeVisible();
+    await editReassignment(row, number);
+    await expect(stage.locator("option")).toHaveText(["財務"]);
+  } finally {
+    // 恢復共用測試角色後釋放獨立 Cookie context。
+    await setFixtureManagerRole(page.request, true);
+    await business.close();
+  }
+});
+
+// 過期與傳輸中斷都要求人工讀回；同帳號重驗後不重送，且待辦消失仍保留不確定性。
+test("有限改派過期與結果未確認分別讀回，同帳號恢復後不重送", async ({
+  page,
+  context,
+  request,
+}) => {
+  // 開啟舊版待辦，再用真實 API 先改派同關卡，讓舊畫面收到實際版本衝突。
+  const subject = `改派結果讀回-${runId}`;
+  await apiLogin(request, actorName("applicant"), finalPassword);
+  const { id, number, version } = await seedPending(request, subject);
+  await apiLogin(page.request, "admin", demoAccounts.admin);
+  await page.reload();
+  const panel = await reassignments(page);
+  const row = reassignmentRow(panel, number);
+  const form = await editReassignment(row, number);
+  const stage = form.getByLabel("改派關卡");
+  const reviewer = form.getByLabel("接手審核者");
+  const reason = form.getByLabel("改派原因");
+  const save = form.getByRole("button", { name: "保存改派" });
+  const refresh = panel.getByRole("button", { name: "重新讀取結果" });
+  const headers = { "X-CSRF-TOKEN": await csrf(page.request) };
+  const snapshot = await page.request.get("/api/admin/reassignments", {
+    headers,
+  });
+  expect(snapshot.status()).toBe(200);
+  const { finances }: ReassignmentListDto = await snapshot.json();
+  const finance = finances.find(
+    // 使用本機示範角色作為另一次交易先選中的合格接手人。
+    ({ userName }) => userName === "finance",
+  );
+  if (!finance) throw new Error("改派測試缺少合格財務。");
+  const path = `/api/admin/reassignments/${id}`;
+  const competing = await page.request.post(path, {
+    headers,
+    data: {
+      version,
+      stage: "finance",
+      reviewerId: finance.id,
+      reason: "另一工作階段先改派",
+    },
+  });
+  expect(competing.status()).toBe(204);
+
+  // 計數瀏覽器實際要求的 POST 和 GET，獨立 API 夾具請求不算作畫面操作。
+  let posts = 0;
+  let reads = 0;
+  page.on("request", (request) => {
+    // 只計本案寫入與待辦讀取，不輸出防偽值。
+    if (request.url().endsWith(path) && request.method() === "POST") posts++;
+    if (
+      request.url().endsWith("/api/admin/reassignments") &&
+      request.method() === "GET"
+    )
+      reads++;
+  });
+  await stage.selectOption("finance");
+  await reviewer.selectOption({ label: "finance" });
+  await reason.fill("舊版不可保存");
+  const [stale] = await Promise.all([
+    // 明確確認拒絕是後端版本衝突，沒有落入未知寫入分支。
+    page.waitForResponse((response) => response.url().endsWith(path)),
+    save.click(),
+  ]);
+  expect(stale.status()).toBe(409);
+  expect((await stale.json()).code).toBe("stale_version");
+  await expect(panel.getByRole("alert")).toContainText("待辦狀態或人選已變更");
+  await expect(save).toHaveCount(0);
+  expect(reads).toBe(0);
+  await refresh.click();
+  await expect(row.getByText("finance", { exact: true })).toBeVisible();
+  expect(reads).toBe(1);
+  expect(posts).toBe(1);
+
+  // 用新版明確選擇不同人選；真實 POST 提交後只中斷回到瀏覽器的傳輸。
+  await editReassignment(row, number);
+  await stage.selectOption("finance");
+  await reviewer.selectOption({ label: actorName("finance") });
+  await reason.fill("已提交但回應遺失");
+  await page.route(
+    `**${path}`,
+    async (route) => {
+      // 瀏覽器收不到 204，實際資料庫仍保存該次寫入。
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(204);
+      await route.abort("failed");
+    },
+    { times: 1 },
+  );
+  await save.click();
+  await expect(panel.getByRole("alert")).toContainText("改派結果未確認");
+  await expect(panel.getByRole("alert")).toBeFocused();
+  await expect(save).toHaveCount(0);
+  expect(reads).toBe(1);
+
+  // 往返組織面板及同帳號身分恢復都保留標記，沒有背景 GET 或 POST。
+  await page.getByRole("button", { name: "組織管理", exact: true }).click();
+  await expect(page.getByText("「有限改派」有待讀取的結果。")).toBeVisible();
+  await reassignments(page);
+  await expect(refresh).toBeEnabled();
+  expect(reads).toBe(1);
+  await context.clearCookies({ name: "procurement.csrf" });
+  await refresh.click();
+  await expect(panel).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "請先確認登入狀態" }),
+  ).toBeFocused();
+  await page.getByRole("button", { name: "重新確認身分" }).click();
+  await expect(panel.getByRole("alert")).toContainText("改派結果未確認");
+  expect(reads).toBe(2);
+
+  // 申請人從實際已保存資料確認兩筆同關改派；撤回後管理讀回只知道案件已離開待辦。
+  const businessHeaders = { "X-CSRF-TOKEN": await csrf(request) };
+  const detail = await request.get(`/api/requisitions/${id}`, {
+    headers: businessHeaders,
+  });
+  expect(detail.status()).toBe(200);
+  const persisted: RequisitionDetailDto = await detail.json();
+  expect(
+    persisted.history.map(
+      // 確認只有競爭者及第二次瀏覽器寫入留下改派，舊版沒有部分寫入。
+      ({ kind, stage, reassignment }) => [
+        kind,
+        stage,
+        reassignment?.reason ?? null,
+      ],
+    ),
+  ).toEqual([
+    ["submitted", null, null],
+    ["reassigned", "finance", "另一工作階段先改派"],
+    ["reassigned", "finance", "已提交但回應遺失"],
+  ]);
+  const withdrawn = await request.post(`/api/requisitions/${id}/withdraw`, {
+    headers: businessHeaders,
+    data: { version: persisted.version },
+  });
+  expect(withdrawn.status()).toBe(200);
+  await refresh.click();
+  await expect(panel.getByRole("alert")).toHaveText(
+    "原改派結果仍未確認。該單目前已不在待辦清單中。",
+  );
+  await expect(row).toHaveCount(0);
+  expect(reads).toBe(3);
+  expect(posts).toBe(2);
+
+  // 重新送審後，申請人仍能在畫面分辨原輪兩筆同關改派與目前的新輪次。
+  const previous: RequisitionDetailDto = await withdrawn.json();
+  const resubmitted = await request.post(`/api/requisitions/${id}/submit`, {
+    headers: businessHeaders,
+    data: { version: previous.version },
+  });
+  expect(resubmitted.status()).toBe(200);
+  await apiLogin(page.request, actorName("applicant"), finalPassword);
+  await page.reload();
+  const business = await approvals(page);
+  await openApproval(business, subject);
+  await history(business, [
+    `第 1 輪 · 送出簽核 · ${actorName("applicant")}`,
+    "第 1 輪 · 財務改派 · admin",
+    "第 1 輪 · 財務改派 · admin",
+    `第 1 輪 · 撤回修改 · ${actorName("applicant")}`,
+    `第 2 輪 · 送出簽核 · ${actorName("applicant")}`,
+  ]);
+  const events = business
+    .getByRole("list", { name: "操作歷程" })
+    .getByRole("listitem");
+  await expect(events.nth(1)).toContainText("另一工作階段先改派");
+  await expect(events.nth(2)).toContainText("已提交但回應遺失");
+});
+
+// 驗證 204 後的讀回與換帳號隔離，以及明確登出時清除未確認結果。
+test("有限改派已保存與讀回失敗分開，分頁換帳號不沿用管理資料", async ({
+  page,
+  context,
+  request,
+}) => {
+  // 由業務帳號建立待辦，再由同頁面的管理身分開啟改派。
+  const subject = `已確認改派-${runId}`;
+  await apiLogin(request, actorName("applicant"), finalPassword);
+  const { id, number } = await seedPending(request, subject);
+  await apiLogin(page.request, "admin", demoAccounts.admin);
+  await page.reload();
+  const panel = await reassignments(page);
+  const row = reassignmentRow(panel, number);
+  const form = await editReassignment(row, number);
+  await form.getByLabel("接手審核者").selectOption({ label: "manager" });
+  await form.getByLabel("改派原因").fill("確認保存後改登入");
+  let posts = 0;
+  page.on("request", (request) => {
+    // 只計提交次數，不記錄本文或憑證。
+    if (
+      request.method() === "POST" &&
+      request.url().endsWith(`/api/admin/reassignments/${id}`)
+    )
+      posts++;
+  });
+  await page.route(
+    "**/api/admin/reassignments",
+    async (route) => {
+      // POST 仍走真實 API，僅使接續的 GET 傳輸失敗。
+      await route.abort("failed");
+    },
+    { times: 1 },
+  );
+  await form.getByRole("button", { name: "保存改派" }).click();
+  const confirmed = panel.getByRole("status").filter({ hasText: "改派已保存" });
+  await expect(confirmed).toHaveText(
+    "改派已保存。請重新讀取結果以取得目前待辦。",
+  );
+  await expect(panel.getByRole("alert")).toContainText("無法讀取改派待辦");
+  await expect(row).toHaveCount(0);
+
+  // 同帳號恢復先保留確認結果，重新進面板仍須使用者明確觸發讀回。
+  const refresh = panel.getByRole("button", { name: "重新讀取結果" });
+  await page.getByRole("button", { name: "重新確認身分" }).click();
+  await expect(refresh).toBeEnabled();
+  await expect(confirmed).toBeVisible();
+  await expect(row).toHaveCount(0);
+
+  // 在另一分頁更換共用 Cookie；改派 GET 必須帶舊管理權杖並遭真實 API 拒絕。
+  const second = await context.newPage();
+  await apiLogin(second.request, actorName("applicant"), finalPassword);
+  const [denied] = await Promise.all([
+    // 檢查該次讀回的 HTTP 回應，不能因另一次查詢的錯誤而誤判。
+    page.waitForResponse((response) =>
+      response.url().endsWith("/api/admin/reassignments"),
+    ),
+    refresh.click(),
+  ]);
+  expect(denied.status()).toBe(400);
+  expect((await denied.json()).code).toBe("invalid_csrf");
+  expect(Boolean(denied.request().headers()["x-csrf-token"])).toBe(true);
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByText(number, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "重新確認身分" }).click();
+  await expect(page.getByRole("region", { name: "目前身分" })).toContainText(
+    actorName("applicant"),
+  );
+  await expect(
+    page.getByRole("button", { name: "有限改派", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByText("改派已保存", { exact: false })).toHaveCount(0);
+
+  // 先前的確認只屬原操作，已確認換人後再回原帳號不恢復該標記。
+  await apiLogin(second.request, "admin", demoAccounts.admin);
+  await page.getByRole("button", { name: "重新確認身分" }).click();
+  await reassignments(page);
+  await expect(row.getByText("manager", { exact: true })).toBeVisible();
+  await expect(refresh).toHaveCount(0);
+  expect(posts).toBe(1);
+
+  // 另一筆真實改派已提交但回應中斷，確認主動登出會結束本頁的待讀回狀態。
+  await editReassignment(row, number);
+  await form
+    .getByLabel("接手審核者")
+    .selectOption({ label: actorName("manager") });
+  await form.getByLabel("改派原因").fill("登出前遺失回應");
+  await page.route(
+    `**/api/admin/reassignments/${id}`,
+    async (route) => {
+      // 真實寫入只送一次；讓畫面無法取得已保存的 204。
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(204);
+      await route.abort("failed");
+    },
+    { times: 1 },
+  );
+  await form.getByRole("button", { name: "保存改派" }).click();
+  await expect(panel.getByRole("alert")).toContainText("改派結果未確認");
+  await expect(refresh).toBeEnabled();
+  await page.getByRole("button", { name: "登出", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "登入", exact: true }),
+  ).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByText("改派結果未確認", { exact: false })).toHaveCount(
+    0,
+  );
+
+  // 同一管理帳號重新登入後由普通 GET 載入目前人選，不恢復標記或重送 POST。
+  await login(page, "admin");
+  await reassignments(page);
+  await expect(
+    row.getByText(actorName("manager"), { exact: true }),
+  ).toBeVisible();
+  await expect(refresh).toHaveCount(0);
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  expect(posts).toBe(2);
 });
 
 // 真實撤權後舊分頁必須移除明細；申請人仍可核對原關卡和草稿補正指引。

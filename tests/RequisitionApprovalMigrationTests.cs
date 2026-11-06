@@ -9,6 +9,8 @@ using Xunit;
 public sealed class RequisitionApprovalMigrationTests
 {
     private const string ApprovalMigration = "20261105134024_RequisitionApproval";
+    private const string WithdrawalMigration = "20261105152023_RequisitionWithdrawal";
+    private const string ReassignmentMigration = "20261105235357_RequisitionReassignment";
     private static readonly Guid Pending = Guid.Parse("de161f04-318f-40fa-9840-cdd0c1737c27");
     private static readonly Guid Decided = Guid.Parse("de161f04-318f-40fa-9840-cdd0c1737c28");
 
@@ -64,6 +66,16 @@ public sealed class RequisitionApprovalMigrationTests
             Assert.Equal(2, rounds);
             Assert.Equal(3, await StoredEventCount(db));
 
+            // 既有輪次與歷程的新欄位保持空值，讀取有效人選時自然回到原指派。
+            Assert.True(await db.Database.SqlQueryRaw<bool>("""
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM "RequisitionRounds" WHERE "ManagerReplacementId" IS NOT NULL OR "FinanceReplacementId" IS NOT NULL
+                    UNION ALL
+                    SELECT 1 FROM "RequisitionApprovalEvents"
+                    WHERE "PreviousReviewerId" IS NOT NULL OR "NewReviewerId" IS NOT NULL OR "Reason" IS NOT NULL
+                ) AS "Value"
+                """).SingleAsync());
+
             // 同輪送審及撤回可以共存，各只接受一次；核准與駁回仍互斥。
             Assert.Equal(1, await InsertEvent(db, Pending, "withdrawn", null));
             await AssertEventRejected(db, Pending, "withdrawn", null, PostgresErrorCodes.UniqueViolation);
@@ -71,16 +83,35 @@ public sealed class RequisitionApprovalMigrationTests
             await AssertEventRejected(db, Decided, "rejected", "manager", PostgresErrorCodes.UniqueViolation);
             await AssertEventRejected(db, Decided, "approved", null, PostgresErrorCodes.CheckViolation);
             await AssertEventRejected(db, Decided, "withdrawn", "finance", PostgresErrorCodes.CheckViolation);
+            await AssertEventRejected(db, Decided, "reassigned", "finance", PostgresErrorCodes.CheckViolation);
             Assert.Equal(4, await StoredEventCount(db));
 
             // 舊版無法表示撤回歷程；在隔離 schema 確認降版會失敗且完整保留資料。
             var pendingWithWithdrawal = await StoredApproval(db, Pending);
             var downgrade = await Assert.ThrowsAsync<PostgresException>(() => db.GetService<IMigrator>().MigrateAsync(ApprovalMigration));
             Assert.Equal(PostgresErrorCodes.UniqueViolation, downgrade.SqlState);
-            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            Assert.Equal(ReassignmentMigration, Assert.Single(await db.Database.GetPendingMigrationsAsync()));
             Assert.Equal(pendingWithWithdrawal, await StoredApproval(db, Pending));
             Assert.Equal(decidedBefore, await StoredApproval(db, Decided));
             await AssertEventRejected(db, Pending, "withdrawn", null, PostgresErrorCodes.UniqueViolation);
+
+            // 回到最新版；有改派紀錄後，降回 Ticket 05 的單次遷移必須全部回滾。
+            await db.Database.MigrateAsync();
+            await db.Database.ExecuteSqlRawAsync("""
+                UPDATE "RequisitionRounds" SET "FinanceReplacementId" = 'legacy-next'
+                    WHERE "RequisitionId" = 'de161f04-318f-40fa-9840-cdd0c1737c28';
+                INSERT INTO "RequisitionApprovalEvents" ("RequisitionId", "RoundNumber", "Kind", "Stage", "ActorId", "OccurredAt",
+                    "PreviousReviewerId", "NewReviewerId", "Reason")
+                VALUES ('de161f04-318f-40fa-9840-cdd0c1737c28', 1, 'reassigned', 'finance', 'legacy-owner', '2026-11-04T06:07:08Z',
+                    'legacy-finance', 'legacy-next', '延續既有待辦');
+                """);
+            var beforeDowngrade = await StoredReassignment(db);
+            var rejected = await Assert.ThrowsAsync<PostgresException>(() => db.GetService<IMigrator>().MigrateAsync(WithdrawalMigration));
+            Assert.Equal(PostgresErrorCodes.CheckViolation, rejected.SqlState);
+            Assert.Equal("CK_RequisitionApprovalEvents_KindStage", rejected.ConstraintName);
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            Assert.Equal(beforeDowngrade, await StoredReassignment(db));
+            Assert.Equal(pendingWithWithdrawal, await StoredApproval(db, Pending));
         }
         finally
         {
@@ -97,7 +128,8 @@ public sealed class RequisitionApprovalMigrationTests
         INSERT INTO "AspNetUsers" ("Id", "AccountType", "Active", "UserName", "EmailConfirmed",
             "PhoneNumberConfirmed", "TwoFactorEnabled", "LockoutEnabled", "AccessFailedCount")
         VALUES ('legacy-manager', 'business', true, '舊主管', false, false, false, false, 0),
-            ('legacy-finance', 'business', true, '舊財務', false, false, false, false, 0);
+            ('legacy-finance', 'business', true, '舊財務', false, false, false, false, 0),
+            ('legacy-next', 'business', true, '接手財務', false, false, false, false, 0);
         INSERT INTO "Requisitions" ("Id", "Number", "ApplicantId", "Status", "Subject", "Purpose",
             "EstimatedAmount", "Version", "CreatedAt", "UpdatedAt")
         VALUES ('de161f04-318f-40fa-9840-cdd0c1737c27', 'PR-de161f04318f40fa9840cdd0c1737c27', 'legacy-owner',
@@ -140,11 +172,23 @@ public sealed class RequisitionApprovalMigrationTests
     private static Task<string> StoredApproval(AuthDb db, Guid id) => db
         .Database
         .SqlQuery<string>($"""
-            SELECT jsonb_build_object('header', to_jsonb(d), 'round', to_jsonb(r), 'history',
-                (SELECT jsonb_agg(to_jsonb(e) ORDER BY e."Id")
+            SELECT jsonb_build_object('header', to_jsonb(d),
+                'round', to_jsonb(r) - ARRAY['ManagerReplacementId', 'FinanceReplacementId'], 'history',
+                (SELECT jsonb_agg(to_jsonb(e) - ARRAY['PreviousReviewerId', 'NewReviewerId', 'Reason'] ORDER BY e."Id")
                  FROM "RequisitionApprovalEvents" e WHERE e."RequisitionId" = d."Id"))::text AS "Value"
             FROM "Requisitions" d JOIN "RequisitionRounds" r ON r."RequisitionId" = d."Id"
             WHERE d."Id" = {id}
+            """)
+        .SingleAsync();
+
+    // 降版前後完整比較被改派的輪次及歷程，包含新版才有的有效指派與稽核欄位。
+    private static Task<string> StoredReassignment(AuthDb db) => db
+        .Database
+        .SqlQuery<string>($"""
+            SELECT jsonb_build_object('round', to_jsonb(r), 'history',
+                (SELECT jsonb_agg(to_jsonb(e) ORDER BY e."Id")
+                 FROM "RequisitionApprovalEvents" e WHERE e."RequisitionId" = r."RequisitionId"))::text AS "Value"
+            FROM "RequisitionRounds" r WHERE r."RequisitionId" = {Decided}
             """)
         .SingleAsync();
 

@@ -14,7 +14,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
     private const string Applicant = "Applicant";
 
     // 讀取組織快照時也使用管理交易，部門和帳號才能一起反映最近一次設定。
-    public Task<IResult> Read(ClaimsPrincipal principal, CancellationToken ct) => RunAsAdmin(principal, async () =>
+    public Task<IResult> Read(ClaimsPrincipal principal, CancellationToken ct) => RunAsAdmin(principal, async _ =>
     {
         // 保留停用部門及原有識別，讓畫面可顯示歷史歸屬。
         var departments = await db
@@ -44,7 +44,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
 
     // 新增部門由伺服器產生識別及版本，預設啟用供分配帳號。
     public Task<IResult> CreateDepartment(CreateDepartmentRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
-        RunAsAdmin(principal, () =>
+        RunAsAdmin(principal, _ =>
         {
             // 先檢查原始輸入，避免修剪名稱時靜默移除換行。
             if (AuthService.ContainsCrOrLf(request.Name))
@@ -63,7 +63,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
     // 修改部門時比較讀取版本，停用只修改狀態，不移除既有歸屬。
     public Task<IResult> UpdateDepartment(
         string id, UpdateDepartmentRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
-        RunAsAdmin(principal, async () =>
+        RunAsAdmin(principal, async _ =>
         {
             // 和新增採同一單行規則，名稱首尾的換行也須拒絕。
             if (AuthService.ContainsCrOrLf(request.Name))
@@ -94,7 +94,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
     // 建立業務帳號及初始角色，並要求使用者登入後更換臨時密碼。
     public Task<IResult> CreateAccount(
         CreateBusinessAccountRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
-        RunAsAdmin(principal, async () =>
+        RunAsAdmin(principal, async _ =>
         {
             // 先拒絕單行欄位不能保留的換行，避免帳號修剪掩蓋無效輸入。
             if (AuthService.ContainsCrOrLf(request.UserName) || AuthService.ContainsCrOrLf(request.Password))
@@ -137,7 +137,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
     // 保存業務帳號的設定，舊歸屬或審核人可原樣保留，變更時才檢查當下資格。
     public Task<IResult> UpdateAccount(
         string id, UpdateBusinessAccountRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
-        RunAsAdmin(principal, async () =>
+        RunAsAdmin(principal, async _ =>
         {
             // 更新須包含版本與所有狀態選項，避免遺漏欄位即意外撤權。
             if (string.IsNullOrEmpty(request.Version)
@@ -184,7 +184,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
     // 重設業務密碼須帶回版本，更新憑證與撤銷所有登入共用同一交易。
     public Task<IResult> ResetPassword(
         string id, ResetBusinessPasswordRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
-        RunAsAdmin(principal, async () =>
+        RunAsAdmin(principal, async _ =>
         {
             // 重設不接受空版本或不符合共用長度規則的臨時密碼。
             if (!ValidId(id)
@@ -212,8 +212,8 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
         }, ct);
 
     // 在管理交易中重查操作者，成功寫入與該次登入的活動紀錄一起提交。
-    private async Task<IResult> RunAsAdmin(
-        ClaimsPrincipal principal, Func<Task<IResult>> operation, CancellationToken ct, bool recordActivity = true)
+    internal async Task<IResult> RunAsAdmin(
+        ClaimsPrincipal principal, Func<AppUser, Task<IResult>> operation, CancellationToken ct, bool recordActivity = true)
     {
         // 先取得組織交易鎖，再依序鎖定操作者及異動帳號，避免不同操作以反序持鎖。
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -229,7 +229,7 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
             return AuthService.Error(403, "forbidden", "此操作僅限管理帳號。");
 
         // 驗證拒絕或儲存例外會讓交易釋放時回滾，包含已發出的撤銷 SQL。
-        var result = await operation();
+        var result = await operation(actor);
         if (result is IStatusCodeHttpResult { StatusCode: >= 200 and < 300 })
         {
             await db.SaveChangesAsync(ct);

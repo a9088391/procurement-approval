@@ -9,6 +9,7 @@ import {
 import { createRoot } from "react-dom/client";
 import { ApiError, readSession, writeAuth, type IdentityDto } from "./api";
 import { Organization } from "./Organization";
+import { Reassignments, type ReassignmentReadback } from "./Reassignments";
 import {
   RequisitionApprovals,
   type ApprovalReadback,
@@ -44,12 +45,23 @@ function App() {
   const [unknownOrganizationFor, setUnknownOrganizationFor] = useState<
     string | null
   >(null);
+  // 組織操作收到 204 後，只保留該帳號的保存確認，設定和表單仍隨面板卸載。
+  const [organizationConfirmation, setOrganizationConfirmation] = useState<{
+    actor: string;
+    label: string;
+  } | null>(null);
   const [unknownDraftFor, setUnknownDraftFor] = useState<string | null>(null);
   // 只跨畫面保留待核對的識別、版本及結果；請購資料本身隨受保護面板卸載。
   const [approvalContext, setApprovalContext] = useState<{
     actor: string;
     active: boolean;
     readbacks: Record<string, ApprovalReadback>;
+  } | null>(null);
+  // 改派讀回只跨同一管理帳號保留，畫面失效時仍卸載原待辦資料及表單。
+  const [reassignmentContext, setReassignmentContext] = useState<{
+    actor: string;
+    active: boolean;
+    readback: ReassignmentReadback | null;
   } | null>(null);
 
   // token 只留在記憶體，不寫入網址或瀏覽器儲存空間。
@@ -58,12 +70,12 @@ function App() {
   const busy = useRef(false);
   const recovery = useRef<HTMLElement>(null);
   const draftLeave = useRef({ warn: false, unknown: false });
-  // 受保護畫面要求確認身分時，已確認保存的事實獨立於失效指引。
-  const protectedRecovery = useRef<{ confirmedWrite?: string } | null>(null);
+  // 記錄身分重驗是否來自受保護端點拒絕，以便清除過期指引。
+  const protectedRecovery = useRef(false);
   const actorName = identity?.userName;
 
-  // 請購請求使用目前身分的記憶體權杖，固定回呼避免重新啟動清單讀取。
-  const getRequisitionToken = useCallback(() => token.current, []);
+  // 受保護請求使用目前身分的記憶體權杖，固定回呼避免重新啟動清單讀取。
+  const getProtectedToken = useCallback(() => token.current, []);
 
   // 身分與受保護畫面共用閘門，避免登入切換與舊資料讀回交錯。
   const beginOperation = useCallback(() => {
@@ -81,17 +93,29 @@ function App() {
   }, []);
 
   // 受保護端點拒絕身分或防偽時，先移除資料，再由使用者重新確認。
-  const recoverProtectedSession = useCallback(
-    (notice: string, confirmedWrite?: string) => {
-      // 舊權杖及表單一起清除，保存確認與恢復指引分開供重讀使用。
-      protectedRecovery.current = { confirmedWrite };
-      token.current = "";
-      setIdentity(null);
-      setMessage(notice);
-      setIsError(true);
-      setPhase("recovery");
+  const recoverProtectedSession = useCallback((notice: string) => {
+    // 清除舊權杖及表單；確認訊息仍由發出原操作的帳號持有。
+    protectedRecovery.current = true;
+    token.current = "";
+    setIdentity(null);
+    setMessage(notice);
+    setIsError(true);
+    setPhase("recovery");
+  }, []);
+
+  // 保存或清除目前管理帳號的確認；固定回呼讓面板不因標記改變而重新查詢。
+  const markOrganizationWrite = useCallback(
+    (label: string | null) => {
+      if (!actorName) return;
+      setOrganizationConfirmation(
+        // 只為目前帳號新增確認；清除也只適用於該帳號發出的操作。
+        (current) => {
+          if (label !== null) return { actor: actorName, label };
+          return current?.actor === actorName ? null : current;
+        },
+      );
     },
-    [],
+    [actorName],
   );
 
   // 身分失效時只保留未決操作的帳號標記；舊草稿和內容一併卸載。
@@ -123,12 +147,44 @@ function App() {
     if (draftLeave.current.unknown && actorName) setUnknownDraftFor(actorName);
   }
 
-  // 只有確認切換成其他帳號才捨棄舊標記；匿名或暫時無法查證時仍可由原帳號讀回。
-  function keepApprovalContextFor(confirmed: IdentityDto | null) {
+  // 重驗時確認換人才清除舊標記；暫時失效可由原帳號讀回，明確登出另在成功分支清除管理標記。
+  function keepPanelContextsFor(confirmed: IdentityDto | null) {
     if (!confirmed) return;
     setApprovalContext(
       // 已確認換人時移除舊帳號的面板選擇和全部待核對標記。
       (current) => (current?.actor === confirmed.userName ? current : null),
+    );
+    setReassignmentContext(
+      // 改派也只供發出原操作的管理帳號核對。
+      (current) => (current?.actor === confirmed.userName ? current : null),
+    );
+    setOrganizationConfirmation(
+      // 已確認換人時不沿用原組織操作的保存確認。
+      (current) => (current?.actor === confirmed.userName ? current : null),
+    );
+  }
+
+  // 管理面板在同一帳號間切換時保留待核對結果，進行中的讀寫禁止切換。
+  function switchAdminPanel(active: boolean) {
+    if (busy.current || !actorName) return;
+    setReassignmentContext(
+      // 面板選擇可切換，待核對結果仍屬於原帳號。
+      (current) => ({
+        actor: actorName,
+        active,
+        readback: current?.actor === actorName ? current.readback : null,
+      }),
+    );
+  }
+
+  // 只允許原管理帳號的操作保留或清除其改派讀回入口。
+  function markReassignmentWrite(readback: ReassignmentReadback | null) {
+    setReassignmentContext(
+      // 目前帳號的面板選擇獨立於結果，讀回後不切回組織管理。
+      (current) =>
+        current && current.actor === actorName
+          ? { ...current, readback }
+          : current,
     );
   }
 
@@ -219,12 +275,11 @@ function App() {
     // 讀取成功後才顯示對應表單；先前不確定的寫入提示仍由原狀態保留。
     try {
       const session = await readSession();
-      keepApprovalContextFor(session.identity);
-      // 身分恢復已完成，撤下舊指引但保留已收到的保存確認。
+      keepPanelContextsFor(session.identity);
+      // 身分恢復已完成，撤下舊指引；已確認保存由同帳號面板呈現。
       if (protectedRecovery.current) {
-        const { confirmedWrite } = protectedRecovery.current;
-        protectedRecovery.current = null;
-        setMessage(confirmedWrite ? `${confirmedWrite}。` : "");
+        protectedRecovery.current = false;
+        setMessage("");
         setIsError(false);
       }
 
@@ -308,13 +363,15 @@ function App() {
       // 記下寫入已成功，讓後續讀取失敗仍可顯示正確的操作結果。
       accepted = true;
 
-      // 成功登入或改密碼解除身分操作的未知提示；登出清除原帳號的未決提示。
+      // 成功登入或改密碼解除身分操作的未知提示；明確登出清除原管理帳號的讀回與未決提示。
       if (operation !== "logout") {
         setUnknownResult(false);
         rememberUnknownDraft();
       } else {
         setUnknownOrganizationFor(null);
+        setOrganizationConfirmation(null);
         setUnknownDraftFor(null);
+        setReassignmentContext(null);
       }
 
       // 先卸載舊表單並記下此操作的成功提示，再查證切換後的身分。
@@ -330,7 +387,7 @@ function App() {
 
       // 重新取得權杖與身分，讓下一個表單對應寫入後的 Cookie 狀態。
       const session = await readSession();
-      keepApprovalContextFor(session.identity);
+      keepPanelContextsFor(session.identity);
       // 確認換人後清除前一個帳號的未決提示，避免跨身分出現。
       if (session.identity) {
         setUnknownOrganizationFor(
@@ -379,7 +436,7 @@ function App() {
             // 登入失效時立即試讀目前身分，讓已確認的匿名狀態回到登入表單。
             try {
               const session = await readSession();
-              keepApprovalContextFor(session.identity);
+              keepPanelContextsFor(session.identity);
               token.current = session.token;
               setIdentity(session.identity);
               setPhase("ready");
@@ -398,6 +455,9 @@ function App() {
   // 只允許目前身分採用面板選擇；暫時未驗證時不掛載請購資料。
   const approvalActive =
     approvalContext?.actor === actorName && approvalContext?.active === true;
+  const currentReassignment =
+    reassignmentContext?.actor === actorName ? reassignmentContext : null;
+  const reassignmentActive = currentReassignment?.active === true;
 
   // 僅 ready 掛載身分對應的表單；離開 ready 即清除 DOM 中的敏感輸入。
   return (
@@ -546,23 +606,74 @@ function App() {
           {identity.accountType === "admin" &&
           identity.roles.includes("Administrator") &&
           identity.mustChangePassword === false ? (
-            // 確認具管理資格且已解除改密碼限制後，才載入組織資料。
-            <Organization
-              key={identity.userName}
-              getToken={
-                // 實際送出管理寫入時才讀取目前身分的記憶體權杖。
-                () => token.current
-              }
-              pending={pending}
-              beginOperation={beginOperation}
-              finishOperation={finishOperation}
-              onSessionInvalid={recoverProtectedSession}
-              unknownResult={unknownOrganizationFor === identity.userName}
-              onUnknownResult={
-                // 未決結果只對發出該操作的管理帳號顯示。
-                () => setUnknownOrganizationFor(identity.userName)
-              }
-            />
+            // 確認管理資格並解除改密碼限制後，只掛載選擇的管理面板。
+            <>
+              <nav className="requisition-actions" aria-label="管理功能">
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-pressed={!reassignmentActive}
+                  disabled={pending}
+                  onClick={
+                    // 選中原面板時保留畫面及焦點。
+                    () => {
+                      if (reassignmentActive) switchAdminPanel(false);
+                    }
+                  }
+                >
+                  組織管理
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-pressed={reassignmentActive}
+                  disabled={pending}
+                  onClick={
+                    // 只有管理員切換到改派面板時才讀取待辦。
+                    () => {
+                      if (!reassignmentActive) switchAdminPanel(true);
+                    }
+                  }
+                >
+                  有限改派
+                </button>
+              </nav>
+              {!reassignmentActive && currentReassignment?.readback ? (
+                <p role="status">「有限改派」有待讀取的結果。</p>
+              ) : null}
+              {reassignmentActive ? (
+                <Reassignments
+                  key={identity.userName}
+                  getToken={getProtectedToken}
+                  pending={pending}
+                  beginOperation={beginOperation}
+                  finishOperation={finishOperation}
+                  onSessionInvalid={recoverProtectedSession}
+                  readback={currentReassignment.readback}
+                  onReadbackChange={markReassignmentWrite}
+                />
+              ) : (
+                <Organization
+                  key={identity.userName}
+                  getToken={getProtectedToken}
+                  pending={pending}
+                  beginOperation={beginOperation}
+                  finishOperation={finishOperation}
+                  onSessionInvalid={recoverProtectedSession}
+                  confirmedWrite={
+                    organizationConfirmation?.actor === identity.userName
+                      ? organizationConfirmation.label
+                      : ""
+                  }
+                  onConfirmedWriteChange={markOrganizationWrite}
+                  unknownResult={unknownOrganizationFor === identity.userName}
+                  onUnknownResult={
+                    // 未決結果只對發出該操作的管理帳號顯示。
+                    () => setUnknownOrganizationFor(identity.userName)
+                  }
+                />
+              )}
+            </>
           ) : null}
           {identity.accountType === "business" &&
           !identity.mustChangePassword ? (
@@ -601,7 +712,7 @@ function App() {
               {approvalActive && approvalContext ? (
                 <RequisitionApprovals
                   key={identity.userName}
-                  getToken={getRequisitionToken}
+                  getToken={getProtectedToken}
                   pending={pending}
                   beginOperation={beginOperation}
                   finishOperation={finishOperation}
@@ -612,7 +723,7 @@ function App() {
               ) : (
                 <RequisitionDrafts
                   key={identity.userName}
-                  getToken={getRequisitionToken}
+                  getToken={getProtectedToken}
                   pending={pending}
                   beginOperation={beginOperation}
                   finishOperation={finishOperation}

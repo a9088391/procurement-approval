@@ -26,5 +26,13 @@ internal static class RequisitionApprovalEndpoints
         requisitions.MapPost("/{id}/reject", (
             string id, ApprovalRequest request, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
             service.Decide(id, request, http.User, approve: false, ct));
+
+        // 改派路由獨立於業務查詢，僅能讀取有限待辦與修改指定人選。
+        var reassignments = endpoints.MapGroup("/api/admin/reassignments");
+        reassignments.MapGet("", (HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
+            service.ListReassignments(http.User, ct));
+        reassignments.MapPost("/{id}", (
+            string id, ReassignmentRequest request, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
+            service.Reassign(id, request, http.User, ct));
     }
 }

@@ -6,13 +6,25 @@ namespace Procurement;
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed record ApprovalRequest(string? Version);
 
+// 改派接受有限欄位，資格與原人選由資料庫交易判斷。
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record ReassignmentRequest(string? Version, string? Stage, string? ReviewerId, string? Reason);
+
 // 限定人員、部門與歷程的公開欄位，避免回傳帳號設定或憑證。
 internal sealed record RequisitionPerson(string Id, string UserName);
 internal sealed record RequisitionDepartment(string Id, string Name);
 internal sealed record RequisitionRoundSummary(
     int Number, RequisitionDepartment Department, DateTimeOffset SubmittedAt, RequisitionPerson Manager, RequisitionPerson Finance);
 internal sealed record RequisitionHistoryEntry(
-    int RoundNumber, string Kind, string? Stage, RequisitionPerson Actor, DateTimeOffset OccurredAt);
+    int RoundNumber, string Kind, string? Stage, RequisitionPerson Actor, DateTimeOffset OccurredAt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RequisitionHistoryReassignment? Reassignment);
+internal sealed record RequisitionHistoryReassignment(RequisitionPerson PreviousReviewer, RequisitionPerson NewReviewer, string Reason);
+
+// 管理員只取得改派所需欄位；不沿用含內容、金額與申請人的業務摘要。
+internal sealed record ReassignmentItem(
+    Guid Id, string Number, RequisitionDepartment Department, string Stage, bool Paused, string Version,
+    RequisitionPerson Manager, RequisitionPerson Finance);
+internal sealed record ReassignmentList(ReassignmentItem[] Items, RequisitionPerson[] Managers, RequisitionPerson[] Finances);
 
 // 先前輪次僅供申請人查閱，固定內容與該輪部門、指派放在一起。
 internal sealed record RequisitionPreviousRound(

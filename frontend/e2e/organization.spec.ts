@@ -544,27 +544,58 @@ test("組織寫入恢復保留未知結果並完成後續保存", async ({ page 
   await login(page, "admin", accounts.admin);
   const organization = page.getByRole("region", { name: "組織管理" });
   await expect(organization).toBeVisible();
+  await expectStatus(organization, "已讀取目前設定。");
 
   // 真實新增收到 204 後中斷後續 GET，畫面須保留已保存但未讀回的狀態。
-  let failNextOrganizationRead = false;
+  let nextOrganizationReadFailure: "transport" | "auth" | null = null;
+  let organizationReads = 0;
+  let readbackFailurePosts = 0;
+  page.on("request", (request) => {
+    // 只記錄此段的部門寫入次數，避免保存後續讀回時重送。
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/admin/departments"
+    )
+      readbackFailurePosts++;
+  });
   await page.route("**/api/admin/organization", async (route) => {
-    // 僅中斷被明確標記的下一次 GET，其餘讀取照常使用真 API。
-    if (failNextOrganizationRead && route.request().method() === "GET") {
-      failNextOrganizationRead = false;
+    // 只有明確標記的下一次 GET 使用故障回應，其餘讀取走真實 API。
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    organizationReads++;
+    const failure = nextOrganizationReadFailure;
+    nextOrganizationReadFailure = null;
+    if (failure === "transport") {
       await route.abort("failed");
+    } else if (failure === "auth") {
+      await route.fulfill({
+        status: 401,
+        json: { code: "unauthenticated", message: "請先登入。" },
+      });
     } else {
       await route.continue();
     }
   });
-  failNextOrganizationRead = true;
+  nextOrganizationReadFailure = "transport";
   await organization
     .getByRole("form", { name: "新增部門" })
     .getByLabel("新部門名稱", { exact: true })
     .fill(readbackFailureName);
-  await organization
-    .getByRole("form", { name: "新增部門" })
-    .getByRole("button", { name: "新增部門", exact: true })
-    .click();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      // 對真實新增回應確認 204，避免把讀回失敗誤認為交易未提交。
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/admin/departments",
+    ),
+    organization
+      .getByRole("form", { name: "新增部門" })
+      .getByRole("button", { name: "新增部門", exact: true })
+      .click(),
+  ]);
+  expect(created.status()).toBe(204);
   await expect(organization.getByRole("alert")).toContainText(
     "已新增部門，但無法讀回設定。",
   );
@@ -573,15 +604,71 @@ test("組織寫入恢復保留未知結果並完成後續保存", async ({ page 
       .getByRole("form", { name: "新增部門" })
       .getByLabel("新部門名稱"),
   ).toBeDisabled();
-  await organization
-    .getByRole("button", { name: "重新讀取組織設定", exact: true })
-    .click();
+  expect(organizationReads).toBe(1);
+
+  // 往返管理面板只保留原交易的確認；等使用者手動讀回，才載入設定或表單。
+  const organizationTab = page.getByRole("button", {
+    name: "組織管理",
+    exact: true,
+  });
+  const reassignmentTab = page.getByRole("button", {
+    name: "有限改派",
+    exact: true,
+  });
+  const reload = organization.getByRole("button", {
+    name: "重新讀取組織設定",
+    exact: true,
+  });
+  await reassignmentTab.click();
+  await expect(organization).toHaveCount(0);
+  nextOrganizationReadFailure = "transport";
+  await organizationTab.click();
+  await expect(organization.getByRole("alert")).toContainText("已新增部門");
+  await expect(reload).toBeEnabled();
+  await expect(organization.getByRole("form")).toHaveCount(0);
+  expect(organizationReads).toBe(1);
+
+  // 手動讀回再次遇到傳輸失敗，仍保留成功確認及下一次讀取入口。
+  await reload.click();
+  await expect(organization.getByRole("alert")).toContainText(
+    "已新增部門，但無法讀回設定。",
+  );
+  expect(organizationReads).toBe(2);
+
+  // 若讀回要求重新驗證，確認在身分未定時不顯示，重驗原帳號才恢復。
+  nextOrganizationReadFailure = "auth";
+  await reload.click();
+  await expect(
+    page.getByRole("heading", { name: "請先確認登入狀態", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("已新增部門", { exact: false })).toHaveCount(0);
+  await page.getByRole("button", { name: "重新確認身分", exact: true }).click();
+  await expect(organization.getByRole("alert")).toContainText("已新增部門");
+  await expect(reload).toBeEnabled();
+  expect(organizationReads).toBe(3);
+
+  // 成功讀回只載入同一筆真實資料，並在畫面保留本次成功結果。
+  await reload.click();
   await expectStatus(organization, "已新增部門，已讀取目前設定。");
   await expect(
     organization
       .getByLabel("選擇部門", { exact: true })
       .getByRole("option", { name: readbackFailureName, exact: true }),
   ).toHaveCount(1);
+  expect(organizationReads).toBe(4);
+
+  // 成功讀回已消耗待讀回標記；往返後可正常載入設定且只留下同一筆部門。
+  await reassignmentTab.click();
+  await expect(organization).toHaveCount(0);
+  await organizationTab.click();
+  await expectStatus(organization, "已讀取目前設定。");
+  await expect(
+    organization
+      .getByLabel("選擇部門", { exact: true })
+      .getByRole("option", { name: readbackFailureName, exact: true }),
+  ).toHaveCount(1);
+  expect(organizationReads).toBe(5);
+  expect(readbackFailurePosts).toBe(1);
 
   // 只對唯一未知項目提交真 API，再中斷瀏覽器回應並保留 POST 次數。
   let unknownPosts = 0;

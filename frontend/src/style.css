@@ -156,10 +156,15 @@ dd {
   margin-top: 1.5rem;
 }
 
-/* 草稿維持單欄，長主旨和單號可換行，操作按鈕於窄畫面自動換列。 */
+/* 請購面板維持單欄，長主旨和單號可換行，操作按鈕於窄畫面自動換列。 */
 .requisition-drafts,
-.requisition-approvals {
+.requisition-approvals,
+.reassignments {
   overflow-wrap: anywhere;
+}
+
+.reassignments select {
+  text-overflow: ellipsis;
 }
 
 .draft-actions,

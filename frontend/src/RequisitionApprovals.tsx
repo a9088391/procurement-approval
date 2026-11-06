@@ -228,19 +228,34 @@ function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
       {history.length ? (
         <ol aria-label="操作歷程">
           {history.map(
-            // 每輪的送審和撤回沒有關卡，以事件種類區分；審核決定以關卡區分。
-            ({ roundNumber, kind, stage, actor, occurredAt }) => (
-              <li key={`${roundNumber}-${stage ?? kind}`}>
+            // 同輪同關可多次改派；用事件順序區分唯讀且無事件識別的紀錄。
+            (
+              { roundNumber, kind, stage, actor, occurredAt, reassignment },
+              index,
+            ) => (
+              <li key={`${roundNumber}-${kind}-${stage}-${index}`}>
                 第 {roundNumber} 輪{" · "}
                 {kind === "submitted"
                   ? "送出簽核"
                   : kind === "withdrawn"
                     ? "撤回修改"
-                    : `${stage === "manager" ? "主管" : "財務"}${kind === "approved" ? "核准" : "駁回"}`}
+                    : `${stage === "manager" ? "主管" : "財務"}${kind === "reassigned" ? "改派" : kind === "approved" ? "核准" : "駁回"}`}
                 {" · "}
                 {actor.userName}
                 {" · "}
                 <RequisitionTime value={occurredAt} />
+                {kind === "reassigned" && reassignment ? (
+                  <dl>
+                    <dt>原審核者</dt>
+                    <dd>{reassignment.previousReviewer.userName}</dd>
+                    <dt>接手審核者</dt>
+                    <dd>{reassignment.newReviewer.userName}</dd>
+                    <dt>改派原因</dt>
+                    <dd className="requisition-purpose">
+                      {reassignment.reason}
+                    </dd>
+                  </dl>
+                ) : null}
               </li>
             ),
           )}

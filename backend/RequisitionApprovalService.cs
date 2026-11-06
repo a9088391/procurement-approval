@@ -4,8 +4,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Procurement;
 
-// 請購查詢與簽核共用目前可見範圍；決定另受原指派、當前關卡及資格約束。
-internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, TimeProvider clock)
+// 請購查詢與簽核共用目前可見範圍；決定另受目前有效指派、當前關卡及資格約束。
+internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, TimeProvider clock, OrganizationService organization)
 {
     private const string ManagerRole = "Manager";
     private const string FinanceRole = "Finance";
@@ -33,7 +33,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 return NotFound();
             if (summary.Applicant.Id != actor.Id)
                 return Forbidden();
-            if (CheckVersion(summary, request.Version) is { } versionError)
+            if (CheckVersion(summary.Version, request.Version) is { } versionError)
                 return versionError;
             if (summary.Status is not (Requisition.DraftStatus or Requisition.Withdrawn))
                 return InvalidState();
@@ -82,7 +82,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 return NotFound();
             if (summary.Applicant.Id != actor.Id)
                 return Forbidden();
-            if (CheckVersion(summary, request.Version) is { } versionError)
+            if (CheckVersion(summary.Version, request.Version) is { } versionError)
                 return versionError;
             if (WithdrawalCandidate(summary) is not { } round)
                 return InvalidState();
@@ -124,7 +124,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             var summary = await FindVisible(actor, roles, id, ct);
             if (summary is null)
                 return NotFound();
-            if (CheckVersion(summary, request.Version) is { } versionError)
+            if (CheckVersion(summary.Version, request.Version) is { } versionError)
                 return versionError;
             if (summary.Round is not { } round || summary.Status is not (Requisition.ManagerPending or Requisition.FinancePending))
                 return InvalidState();
@@ -154,6 +154,103 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             return await SaveAndRead(actor, roles, draft.Id, ct);
         }, ct, write: true);
 
+    // 管理查詢只取當輪待辦及合格人選，鎖住組織異動直到有限資料讀取完成。
+    internal Task<IResult> ListReassignments(ClaimsPrincipal principal, CancellationToken ct) =>
+        organization.RunAsAdmin(principal, async _ =>
+        {
+            // 查詢與業務待辦共用有效指派及暫停判斷；只投影改派所需欄位。
+            var items = await PendingWorkflows()
+                .OrderBy(w => w.Draft.Number)
+                .Select(w => new ReassignmentItem(
+                    w.Draft.Id, w.Draft.Number, new RequisitionDepartment(w.Round!.DepartmentId, w.Round.DepartmentName),
+                    w.WaitingManager ? RequisitionApprovalEvent.ManagerStage : RequisitionApprovalEvent.FinanceStage,
+                    w.Paused, w.Draft.Version, new RequisitionPerson(w.ManagerId, w.ManagerName),
+                    new RequisitionPerson(w.FinanceId, w.FinanceName)))
+                .ToArrayAsync(ct);
+
+            // 候選人只傳穩定識別與名稱，三人分工仍以提交改派時的該單人選檢查。
+            return Results.Ok(new ReassignmentList(items, await ReviewerPeople(ManagerRole, ct),
+                await ReviewerPeople(FinanceRole, ct)));
+        }, ct, recordActivity: false);
+
+    // 在管理交易中以最新版本更換一個未完成關卡，並原子保存改派歷程。
+    internal Task<IResult> Reassign(string id, ReassignmentRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
+        organization.RunAsAdmin(principal, async actor =>
+        {
+            // 管理端僅可操作待辦清單中的單，其他識別與狀態共用找不到的結果。
+            if (!Guid.TryParse(id, out var key))
+                return NotFound();
+            var current = await PendingWorkflows()
+                .Where(w => w.Draft.Id == key)
+                .Select(w => new { w.Draft, w.Round, w.WaitingManager, w.ManagerId, w.FinanceId })
+                .SingleOrDefaultAsync(ct);
+            if (current?.Round is not { } round)
+                return NotFound();
+
+            // 拒絕無效欄位及超過 UTF-16 長度的原因；NUL 無法保存到 PostgreSQL 文字欄位。
+            var reason = request.Reason?.Trim();
+            if (request.Stage is not (RequisitionApprovalEvent.ManagerStage or RequisitionApprovalEvent.FinanceStage)
+                || string.IsNullOrWhiteSpace(request.ReviewerId)
+                || request.ReviewerId.Contains('\0')
+                || reason is null or { Length: 0 or > RequisitionApprovalEvent.ReasonLimit }
+                || reason.Contains('\0'))
+                return AuthService.Error(400, "invalid_input", "請提供有效的改派關卡、接手人及 1–500 字的原因。");
+            if (CheckVersion(current.Draft.Version, request.Version) is { } versionError)
+                return versionError;
+
+            // 主管待審可改派兩個未完成關卡；已進財務時不得改寫主管決定或指派。
+            var managerStage = request.Stage == RequisitionApprovalEvent.ManagerStage;
+            if (managerStage && !current.WaitingManager)
+                return InvalidState();
+
+            // 資格必須對應目標關卡，與另一關的目前有效人選及申請人維持三人分工。
+            var previous = managerStage ? current.ManagerId : current.FinanceId;
+            var other = managerStage ? current.FinanceId : current.ManagerId;
+            if (request.ReviewerId == previous
+                || request.ReviewerId == other
+                || request.ReviewerId == current.Draft.ApplicantId
+                || !await EligibleReviewerIds(managerStage ? ManagerRole : FinanceRole).ContainsAsync(request.ReviewerId, ct))
+                return ReviewersUnavailable();
+
+            // 不更動原送審快照及待審關卡；交易同時提交有效指派、版本、歷程與登入活動。
+            if (managerStage)
+                round.ManagerReplacementId = request.ReviewerId;
+            else
+                round.FinanceReplacementId = request.ReviewerId;
+            var now = Requisition.CurrentTimestamp(clock);
+            Advance(current.Draft, current.Draft.Status, now);
+            db.RequisitionApprovalEvents.Add(new RequisitionApprovalEvent
+            {
+                RequisitionId = current.Draft.Id,
+                RoundNumber = round.Number,
+                Kind = RequisitionApprovalEvent.Reassigned,
+                Stage = request.Stage,
+                ActorId = actor.Id,
+                OccurredAt = now,
+                PreviousReviewerId = previous,
+                NewReviewerId = request.ReviewerId,
+                Reason = reason
+            });
+            return Results.NoContent();
+        }, ct);
+
+    // 待辦清單和寫入採相同範圍，包含待審中的暫停案件。
+    private IQueryable<CurrentWorkflow> PendingWorkflows() =>
+        CurrentWorkflows().Where(w => w.Round != null && (w.WaitingManager || w.WaitingFinance));
+
+    // 只投影具該關角色的啟用業務帳號，避免在管理改派讀取不相干的帳號資料。
+    private Task<RequisitionPerson[]> ReviewerPeople(string role, CancellationToken ct)
+    {
+        var eligible = EligibleReviewerIds(role);
+        return db
+            .Users
+            .Where(u => eligible.Contains(u.Id))
+            .OrderBy(u => u.UserName)
+            .ThenBy(u => u.Id)
+            .Select(u => new RequisitionPerson(u.Id, u.UserName ?? ""))
+            .ToArrayAsync(ct);
+    }
+
     // 與管理端採相同鎖序，讓資格變更、送審、撤回、決定及讀回反映同一筆已提交結果。
     private async Task<IResult> RunAsBusiness(
         ClaimsPrincipal principal, Func<AppUser, string[], Task<IResult>> operation, CancellationToken ct, bool write = false)
@@ -179,31 +276,76 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
         return result;
     }
 
-    // 集中定義可見範圍與待辦提示，讓單筆查詢和清單使用同一個 PostgreSQL 查詢。
-    private IQueryable<RequisitionSummary> Visible(AppUser actor, string[] roles, Guid? id = null)
+    // 依最新輪次推導目前有效指派；原始指派留給送審歷史使用。
+    private IQueryable<CurrentWorkflow> CurrentWorkflows()
     {
-        // 其他帳號僅能查已送審且未撤回的單；目前部門、指派及財務進關依最新一輪判定。
-        var manager = roles.Contains(ManagerRole);
-        var finance = roles.Contains(FinanceRole);
+        // 主管待審時兩個未完成關卡皆需合格；主管完成後，只重查仍待審的財務關。
         var eligibleManagers = EligibleReviewerIds(ManagerRole);
         var eligibleFinance = EligibleReviewerIds(FinanceRole);
         return
             from draft in db.Requisitions
-            join applicant in db.Users on draft.ApplicantId equals applicant.Id
             from round in draft.Rounds
                 .OrderByDescending(r => r.Number)
                 .Take(1)
                 .DefaultIfEmpty()
             let waitingManager = draft.Status == Requisition.ManagerPending
             let waitingFinance = draft.Status == Requisition.FinancePending
-            let submitted = waitingManager
-                || waitingFinance
+            let managerId = round.ManagerReplacementId ?? round.ManagerId
+            let financeId = round.FinanceReplacementId ?? round.FinanceId
+            join manager in db.Users on managerId equals manager.Id into managers
+            from manager in managers.DefaultIfEmpty()
+            join finance in db.Users on financeId equals finance.Id into finances
+            from finance in finances.DefaultIfEmpty()
+            let paused = round != null
+                && ((waitingManager && !eligibleManagers.Contains(managerId))
+                    || ((waitingManager || waitingFinance) && !eligibleFinance.Contains(financeId)))
+            select new CurrentWorkflow
+            {
+                Draft = draft,
+                Round = round,
+                WaitingManager = waitingManager,
+                WaitingFinance = waitingFinance,
+                Paused = paused,
+                ManagerId = managerId,
+                FinanceId = financeId,
+                ManagerName = manager == null ? "" : manager.UserName ?? "",
+                FinanceName = finance == null ? "" : finance.UserName ?? ""
+            };
+    }
+
+    // 查詢內部使用同一組有效指派與待審條件，依各端點需求投影公開欄位。
+    private sealed class CurrentWorkflow
+    {
+        public required Requisition Draft { get; init; }
+        public RequisitionRound? Round { get; init; }
+        public bool WaitingManager { get; init; }
+        public bool WaitingFinance { get; init; }
+        public bool Paused { get; init; }
+        public required string ManagerId { get; init; }
+        public required string FinanceId { get; init; }
+        public required string ManagerName { get; init; }
+        public required string FinanceName { get; init; }
+    }
+
+    // 集中定義可見範圍與待辦提示，讓單筆查詢和清單使用同一個 PostgreSQL 查詢。
+    private IQueryable<RequisitionSummary> Visible(AppUser actor, string[] roles, Guid? id = null)
+    {
+        // 他人草稿與撤回單不可見；主管部門、最新有效指派及財務進關各自保留授權來源。
+        var manager = roles.Contains(ManagerRole);
+        var finance = roles.Contains(FinanceRole);
+        return
+            from workflow in CurrentWorkflows()
+            let draft = workflow.Draft
+            let round = workflow.Round
+            join applicant in db.Users on draft.ApplicantId equals applicant.Id
+            let submitted = workflow.WaitingManager
+                || workflow.WaitingFinance
                 || draft.Status == Requisition.Approved
                 || draft.Status == Requisition.Rejected
             let managerVisible = manager
                 && round != null
                 && (round.DepartmentId == actor.DepartmentId
-                    || round.ManagerId == actor.Id)
+                    || workflow.ManagerId == actor.Id)
             let financeVisible = finance
                 && round != null
                 && round.History.Any(e =>
@@ -215,30 +357,22 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                     || (submitted
                         && (managerVisible
                             || financeVisible)))
-            // 當主管已完成，只重查財務；主管待審時兩個未完成關卡都必須合格。
-            let paused = round != null
-                && ((waitingManager
-                        && !eligibleManagers.Contains(round.ManagerId))
-                    || ((waitingManager
-                            || waitingFinance)
-                        && !eligibleFinance.Contains(round.FinanceId)))
+            // 只有目前具角色且被指派到當關的人可以決定，其他查閱授權不產生簽核權。
             let assigned = round != null
-                && ((waitingManager
+                && ((workflow.WaitingManager
                         && manager
-                        && round.ManagerId == actor.Id)
-                    || (waitingFinance
+                        && workflow.ManagerId == actor.Id)
+                    || (workflow.WaitingFinance
                         && finance
-                        && round.FinanceId == actor.Id))
-            let managerUser = round == null ? null : round.Manager
-            let financeUser = round == null ? null : round.Finance
+                        && workflow.FinanceId == actor.Id))
             orderby draft.UpdatedAt descending, draft.Id
             select new RequisitionSummary(draft.Id, draft.Number, draft.Subject,
                 new RequisitionPerson(applicant.Id, applicant.UserName ?? ""), draft.Status,
-                draft.EstimatedAmount, draft.Version, draft.CreatedAt, draft.UpdatedAt, paused, assigned && !paused,
-                round == null ? null : new RequisitionRoundSummary(round.Number,
+                draft.EstimatedAmount, draft.Version, draft.CreatedAt, draft.UpdatedAt, workflow.Paused,
+                assigned && !workflow.Paused, round == null ? null : new RequisitionRoundSummary(round.Number,
                     new RequisitionDepartment(round.DepartmentId, round.DepartmentName), round.SubmittedAt,
-                    new RequisitionPerson(round.ManagerId, managerUser != null ? managerUser.UserName ?? "" : ""),
-                    new RequisitionPerson(round.FinanceId, financeUser != null ? financeUser.UserName ?? "" : "")));
+                    new RequisitionPerson(workflow.ManagerId, workflow.ManagerName),
+                    new RequisitionPerson(workflow.FinanceId, workflow.FinanceName)));
     }
 
     // 單號以外的公開識別須能解析，缺少或無權讀取時共用找不到的結果。
@@ -302,7 +436,14 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             .OrderBy(e => e.RoundNumber)
             .ThenBy(e => e.Id)
             .Select(e => new RequisitionHistoryEntry(e.RoundNumber, e.Kind, e.Stage,
-                new RequisitionPerson(e.ActorId, e.Actor != null ? e.Actor.UserName ?? "" : ""), e.OccurredAt))
+                new RequisitionPerson(e.ActorId, e.Actor != null ? e.Actor.UserName ?? "" : ""), e.OccurredAt,
+                e.PreviousReviewerId != null
+                    && e.NewReviewerId != null
+                    && e.Reason != null
+                    ? new RequisitionHistoryReassignment(
+                        new RequisitionPerson(e.PreviousReviewerId, e.PreviousReviewer != null ? e.PreviousReviewer.UserName ?? "" : ""),
+                        new RequisitionPerson(e.NewReviewerId, e.NewReviewer != null ? e.NewReviewer.UserName ?? "" : ""), e.Reason)
+                    : null))
             .ToArrayAsync(ct);
 
         // 撤回後最後一次送審內容也是歷史；其餘已送審狀態以最新輪作為目前內容。
@@ -323,7 +464,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 RequisitionDraftInput.IsComplete(draft), canSubmit, canWithdraw: false, history, previous);
         }
 
-        // 送審後的內容從獨立快照讀取，部門、人選與決定不由目前的申請人設定推算。
+        // 送審後的內容從獨立快照讀取，部門與內容不因改派或申請人的組織設定改變。
         if (round is null)
             throw new InvalidOperationException("已送審的請購必須有送審輪次。");
         var content = await db
@@ -344,7 +485,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
     // 僅供本人明細一次取回所有符合範圍的舊輪，依原輪次排列，不逐輪查詢。
     private async Task<RequisitionPreviousRound[]> PreviousRounds(Guid id, int throughRound, CancellationToken ct)
     {
-        // SQL 只讀到需要的輪次，並合併當時的部門及指派關聯。
+        // SQL 只讀到需要的輪次；合併當時的部門及原始指派，改派另由歷程保留。
         var previous = await db
             .RequisitionRounds
             .Where(r => r.RequisitionId == id && r.Number <= throughRound)
@@ -394,11 +535,11 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
     }
 
     // 只有可見的單才辨識版本，空值與過期值分開回報。
-    private static IResult? CheckVersion(RequisitionSummary summary, string? version)
+    private static IResult? CheckVersion(string currentVersion, string? version)
     {
         if (string.IsNullOrWhiteSpace(version))
             return AuthService.Error(400, "invalid_input", "請提供請購版本。");
-        return version == summary.Version
+        return version == currentVersion
             ? null
             : AuthService.Error(409, "stale_version", "請購單已變更，請重新載入。");
     }

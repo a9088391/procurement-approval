@@ -1,5 +1,19 @@
 # 測試與驗證
 
+## 有限改派與待辦恢復實測
+
+2026-11-06 在 macOS ARM64、Docker Compose 5.5.0、固定 .NET SDK 10.0.403 及隔離 PostgreSQL 18.6 完成 Release HTTP 整合套件，**176／176 通過**。另在空白的獨立測試庫套用正式遷移後重跑，同樣 **176／176 通過**。涵蓋改派欄位隔離、未完成資格補齊、舊指派即時撤權、雙管理員競爭、改派與審核及撤權與審核的兩種提交順序，以及提交失敗時回滾指派、版本及歷程。鎖定還原、Release 建置、兩個 .NET 專案的格式檢查及 EF 模型一致性均通過。
+
+隔離網站由撤回與重送版升級。升級前後 3 筆請購、3 筆明細、4 輪快照與 9 筆事件的舊欄位校驗值相同。以 HTTP 建立、暫停並改派一張請購後執行 `initialize-demo`，停止並重啟 app 與 PostgreSQL。原登入與新登入讀回相同的有效指派、快照、版本及歷程，初始帳號檔校驗值相同。隔離遷移測試另驗證已有改派紀錄時，退回舊 schema 遭拒絕並回滾。
+
+使用固定 Playwright 1.64.1 的 Chromium，新增改派 **3／3**、既有簽核 **9／9**、登入與組織 **14／14**、草稿 **6／6** 通過。改派案例另在同一隔離資料卷獨立重跑 **3／3**，檢查 390 px 與 1280 px 的文字換行及鍵盤焦點。版本衝突由真 API 產生。回應中斷在真交易提交後由測試驅動，驗證只手動 GET、不自動重送，並從業務明細讀回歷程。表單遇到 `400 invalid_input` 時保留欄位的畫面檢查使用模擬回應，真實拒絕與持久化由 HTTP／PostgreSQL 測試驗證。固定 Node 容器的 TypeScript、Vite 建置與 Prettier 檢查通過。 組織設定已保存但讀回失敗時，切換管理面板後仍保留確認，手動 GET 成功才結束讀回。此案例的讀回 401 使用模擬回應，保存、成功讀回及身分重驗都走真 API。改派案例另驗證明確登出再登入後清除原待核對標記，只讀取目前指派。
+
+### 手動驗證
+
+1. 依 [操作步驟](../README.md#有限改派與待辦恢復) 建立替補審核人，送審後由管理員撤除舊主管角色。以申請人讀回，確認仍是主管待審且標示暫停。
+2. 以管理帳號開啟有限改派。核對單號、送審部門、待審關卡及目前人選，主旨、用途、明細及預估金額應不出現。選擇合格人選並輸入原因後改派。
+3. 用申請人重新讀回，核對原內容及部門、前後人選和原因。兩個未完成關卡皆具合格人選時，新主管可從原關卡繼續。若出現過期版本或結果未確認，先按「重新讀取結果」核對目前指派。
+
 ## 撤回與重送實測
 
 2026-11-05 在 macOS ARM64、Compose 5.5.0 和隔離 PostgreSQL 18.6 執行 Release HTTP 整合套件，**164／164 通過**。撤回與主管決定分別先進入 PostgreSQL 等鎖佇列，兩種順序都只留下單一合法結果。另驗證撤回與重送提交失敗的回滾、停用先完成時拒絕撤回、舊輪次分權及多輪快照。Release 建置零警告及錯誤，鎖定還原、兩個 .NET 專案格式及 EF 模型一致性皆通過。
@@ -88,12 +102,15 @@ docker compose -p procurement-approval-test -f compose.test.yaml down
 - `RequisitionApprovalTests`、`RequisitionApprovalAuthorizationTests` 及 `RequisitionApprovalValidationTests` 從 HTTP 驗證送審欄位、金額、部門與人選快照、核准及駁回、依當前角色與部門查閱、舊登入和過期資料拒絕。測試以既有管理 API 設定資格並核對實際清單、明細與歷程。
 - `RequisitionApprovalTransactionTests` 觀察兩筆請求實際等待 PostgreSQL 交易鎖，再核對重複及相反決定。另用管理 API 先提交撤權，以隔離資料庫的延後觸發器使提交故障，驗證原關卡、快照、版本及歷程的一致性。`RequisitionApprovalMigrationTests` 在隔離 schema 比對升級前後的舊草稿及明細。
 
-只重跑本人草稿、簽核或撤回重送的 HTTP 驗證時，使用 Release 測試篩選。撤回的競爭、交易回滾及遷移案例由簽核篩選涵蓋。
+- `RequisitionReassignmentTests` 與 `RequisitionReassignmentTransactionTests` 透過正式 HTTP API 核對欄位隔離、角色與成對權杖、可用關卡、暫停恢復、原因與前後人選。測試觀察 PostgreSQL 交易等待及延後提交故障，從新 HTTP 讀取檢查最終資料與歷程。
+
+只重跑本人草稿、簽核、撤回重送或有限改派的 HTTP 驗證時，使用 Release 測試篩選。撤回的競爭、交易回滾及遷移案例由簽核篩選涵蓋。
 
 ```sh
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionDraft
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionApproval
 docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionWithdrawal
+docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter 'FullyQualifiedName~RequisitionReassignment|FullyQualifiedName~RequisitionApprovalMigration'
 ```
 
 WAF 只以 DI 取代 `TimeProvider` 及測試交易攔截器，正式程式沒有調時間或注入故障的 API。時間案例直接推進測試時鐘，不等待十五分鐘或八小時；競爭案例以 PostgreSQL 等待狀態或交易屏障確定真正重疊，不用任意延遲假裝競爭。
@@ -120,13 +137,15 @@ docker compose -p procurement-approval-browser -f compose.yaml -f compose.browse
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-drafts.spec.ts
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
-docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep-invert '有限改派'
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep '有限改派'
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml down
 ```
 
 最後一個命令只停止並移除隔離瀏覽器容器／網路，保留 volume 及憑證，不加 `--volumes`。不能把專案名稱或掛載目錄改成展示環境。測試 fail-closed 檢查目標 URL、環境標記及憑證權限，使用 Chromium、單一 worker，不自動重試；trace、video 與自動失敗截圖關閉。手動截圖只保存遮罩後的畫面到忽略的本機證據目錄；不得複製 Cookie、密碼或請求本文至測試輸出。
 
-每個批次開始前用 `restart app` 重建隔離網站的記憶體節流計數，沿用同一資料卷、帳號與金鑰。分批驗證登入／組織管理與草稿，避免合計的登入嘗試超過同來源每分鐘 30 次的正式限制。
+每個批次開始前用 `restart app` 重建隔離網站的記憶體節流計數，沿用同一資料卷、帳號與金鑰。分批驗證登入／組織管理、草稿、既有簽核與有限改派，避免合計的登入嘗試超過同來源每分鐘 30 次的正式限制。
 
 真 API 流程涵蓋四種示範身分類別、錯誤帳密後修正、登出及重新載入、錯誤目前密碼後修正、改密碼成功回登入、舊密碼拒絕／新密碼登入、另一個舊登入失效。密碼測試最後只把隔離 `manager` fixture 改回原值，便於重跑，不重設資料庫。
 

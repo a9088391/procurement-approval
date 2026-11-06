@@ -114,6 +114,33 @@ export interface DraftDto extends DraftSummaryDto {
 // 簽核查詢只公開可見摘要；角色資格及暫停狀態採用 API 的目前判斷。
 type RequisitionPerson = { id: string; userName: string };
 
+// 管理員只讀取待辦所需欄位；識別和版本只用來送回同一筆待辦。
+export type ReassignmentStage = "manager" | "finance";
+
+export interface ReassignmentItemDto {
+  id: string;
+  number: string;
+  department: Pick<DepartmentDto, "id" | "name">;
+  stage: ReassignmentStage;
+  paused: boolean;
+  version: string;
+  manager: RequisitionPerson;
+  finance: RequisitionPerson;
+}
+
+export interface ReassignmentListDto {
+  items: ReassignmentItemDto[];
+  managers: RequisitionPerson[];
+  finances: RequisitionPerson[];
+}
+
+interface ReassignmentInputDto {
+  version: string;
+  stage: ReassignmentStage;
+  reviewerId: string;
+  reason: string;
+}
+
 export interface RequisitionSummaryDto extends DraftSummaryDto {
   applicant: RequisitionPerson;
   status:
@@ -147,10 +174,15 @@ export interface RequisitionDetailDto extends RequisitionSummaryDto {
   previousRounds: RequisitionRoundSnapshotDto[];
   history: {
     roundNumber: number;
-    kind: "submitted" | "withdrawn" | "approved" | "rejected";
-    stage: "manager" | "finance" | null;
+    kind: "submitted" | "withdrawn" | "approved" | "rejected" | "reassigned";
+    stage: ReassignmentStage | null;
     actor: RequisitionPerson;
     occurredAt: string;
+    reassignment?: {
+      previousReviewer: RequisitionPerson;
+      newReviewer: RequisitionPerson;
+      reason: string;
+    };
   }[];
 }
 
@@ -261,6 +293,35 @@ export async function writeOrganization(
   // 只將契約定義的 204 視為寫入確認，其他成功狀態也需要人工讀回。
   const response = await post(`admin/${operation.path}`, token, operation.body);
   if (response.status !== 204) throw new Error("無法確認組織寫入回應。");
+}
+
+const reassignmentPath = "admin/reassignments";
+
+// 待辦 GET 驗證畫面身分與 Cookie 的配對，並確認清單可安全用於讀回。
+export async function readReassignments(token: string, signal?: AbortSignal) {
+  // 僅接受契約的成功狀態與完整格式，避免把錯誤回應當成案件已離開待辦。
+  const response = await request(reassignmentPath, {
+    signal,
+    headers: { "X-CSRF-TOKEN": token },
+  });
+  if (response.status !== 200) throw new Error("無法確認改派清單回應。");
+  const value: unknown = await response.json();
+  if (!isReassignmentList(value)) throw new Error("改派清單格式不符。");
+  return value;
+}
+
+// 每次只送指定待辦、關卡、人選及原因，僅 204 代表已確認保存。
+export async function writeReassignment(
+  token: string,
+  id: string,
+  input: ReassignmentInputDto,
+) {
+  const response = await post(
+    `${reassignmentPath}/${encodeURIComponent(id)}`,
+    token,
+    input,
+  );
+  if (response.status !== 204) throw new Error("無法確認改派寫入回應。");
 }
 
 const requisitionPath = "requisitions";
@@ -425,14 +486,49 @@ function isRequisitionPerson(value: unknown) {
   );
 }
 
-// 已送審的輪次須能顯示當時的部門、時間與兩位審核者。部門名稱由後端驗證，前端只檢查型別並保留原值。
+// 部門名稱由後端驗證，前端只檢查型別並保留原值。
+function isRequisitionDepartment(value: unknown) {
+  return (
+    isRecord(value) &&
+    isNonBlankText(value.id) &&
+    typeof value.name === "string"
+  );
+}
+
+// 每筆待辦必須有配對的版本與審核者，避免以無法辨識的資料送出改派。
+function isReassignmentItem(value: unknown) {
+  return (
+    isRecord(value) &&
+    isNonBlankText(value.id) &&
+    isNonBlankText(value.number) &&
+    isRequisitionDepartment(value.department) &&
+    (value.stage === "manager" || value.stage === "finance") &&
+    typeof value.paused === "boolean" &&
+    isNonBlankText(value.version) &&
+    isRequisitionPerson(value.manager) &&
+    isRequisitionPerson(value.finance)
+  );
+}
+
+// 只有完整待辦及兩組角色選項才可作為目前狀態的依據。
+function isReassignmentList(value: unknown): value is ReassignmentListDto {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isReassignmentItem) &&
+    Array.isArray(value.managers) &&
+    value.managers.every(isRequisitionPerson) &&
+    Array.isArray(value.finances) &&
+    value.finances.every(isRequisitionPerson)
+  );
+}
+
+// 已送審的輪次須能顯示當時的部門、時間與兩位審核者。
 function isRequisitionRound(value: unknown) {
   return (
     isRecord(value) &&
     isRoundNumber(value.number) &&
-    isRecord(value.department) &&
-    isNonBlankText(value.department.id) &&
-    typeof value.department.name === "string" &&
+    isRequisitionDepartment(value.department) &&
     isTimestamp(value.submittedAt) &&
     isRequisitionPerson(value.manager) &&
     isRequisitionPerson(value.finance)
@@ -451,17 +547,31 @@ function isRequisitionLine(value: unknown) {
   );
 }
 
-// 送審和撤回沒有審核關卡；有審核決定時必須能辨識主管或財務。
+// 舊事件仍採原契約；改派另須有有效關卡、前後人選及原因。
 function isRequisitionHistoryEntry(value: unknown) {
+  // 所有事件都須可呈現輪次、操作者與時間。
+  if (
+    !isRecord(value) ||
+    !isRoundNumber(value.roundNumber) ||
+    !isRequisitionPerson(value.actor) ||
+    !isTimestamp(value.occurredAt)
+  )
+    return false;
+
+  // 送審與撤回無關卡，審核決定及改派則限兩種固定關卡。
+  if (value.kind === "submitted" || value.kind === "withdrawn")
+    return value.stage === null;
+  if (value.stage !== "manager" && value.stage !== "finance") return false;
+  if (value.kind === "approved" || value.kind === "rejected") return true;
+
+  // 理由的內容依 API 保存的原值呈現，避免用 JavaScript trim 誤拒合法字元。
+  const reassignment = value.reassignment;
   return (
-    isRecord(value) &&
-    isRoundNumber(value.roundNumber) &&
-    isRequisitionPerson(value.actor) &&
-    isTimestamp(value.occurredAt) &&
-    (value.kind === "submitted" || value.kind === "withdrawn"
-      ? value.stage === null
-      : (value.kind === "approved" || value.kind === "rejected") &&
-        (value.stage === "manager" || value.stage === "finance"))
+    value.kind === "reassigned" &&
+    isRecord(reassignment) &&
+    isRequisitionPerson(reassignment.previousReviewer) &&
+    isRequisitionPerson(reassignment.newReviewer) &&
+    typeof reassignment.reason === "string"
   );
 }
 
