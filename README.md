@@ -68,4 +68,4 @@ docker compose -p procurement-approval up --build -d
 - [後端與 API](docs/backend.md)：身分規則、錯誤契約、交易及資料存取。
 - [測試](docs/testing.md)：隔離 HTTP／PostgreSQL 與瀏覽器驗證命令、覆蓋及限制。
 
-展示僅限本機 HTTP，無 TLS，不可直接公開到外網。資料庫不發布主機連接埠；保留資料 volume 與 `.local/keys/` 才能保留資料及原登入期限。未量測負載容量，其他作業系統與 CPU 平台尚未實測。
+展示僅限本機 HTTP，無 TLS，不可直接公開到外網。資料庫不發布主機連接埠；保留資料 volume 與 `.local/keys/` 才能保留資料及原登入期限。本機 ARM64 已通過指定 30 req/s 與 10,000 筆 CSV 基準。其他平台與更高容量尚待量測。[重跑步驟與實測結果](docs/testing.md#指定-http-負載與獨立-csv-匯出)

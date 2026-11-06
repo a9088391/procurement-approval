@@ -1,5 +1,46 @@
 # 測試與驗證
 
+## 指定 HTTP 負載與獨立 CSV 匯出
+
+在專案根目錄執行。兩組命令各自建立 Compose 網路與 PostgreSQL tmpfs，網站及資料庫均無主機連接埠。效能測試使用 Release Kestrel、正式 API、實際 PostgreSQL 及各業務帳號的 Cookie 和 CSRF 權杖。測試只接受空白測試庫，預載後會先執行 PostgreSQL `ANALYZE`。API 容器的日誌等級設為 `Warning`。每個場景結束後執行該組的 `down`，即使測試失敗也一樣。重跑前清理舊場景，讓 PostgreSQL 從空白重新套用 migration。
+
+```sh
+docker compose -p procurement-approval-benchmark-load -f compose.benchmark.yaml up --build -d benchmark-app
+docker compose -p procurement-approval-benchmark-load -f compose.benchmark.yaml run --rm benchmark Load
+docker compose -p procurement-approval-benchmark-load -f compose.benchmark.yaml down
+```
+
+```sh
+docker compose -p procurement-approval-benchmark-csv -f compose.benchmark.yaml up --build -d benchmark-app
+docker compose -p procurement-approval-benchmark-csv -f compose.benchmark.yaml run --rm benchmark Csv
+docker compose -p procurement-approval-benchmark-csv -f compose.benchmark.yaml down
+```
+
+負載場景初始有 10,000 張請購，每張 5 筆明細。四位申請人各有 2,500 張，分別查本人未篩選的清單、明細及統計。草稿保存、送審及核准使用預先保留且互不重疊的既有單。主管與財務各執行本人有資格、輪到本人審核的案件。預熱 60 秒送出 1,800 個請求，完成後正式量測 300 秒。專用排程執行緒以單調時鐘安排每秒 30 個時槽，下一筆不等待前一筆回應。正式量測的 300 個單秒區間各須實際送出 30 筆，任何一筆落後超過一個時槽（約 33.33 毫秒）也會判定該輪未通過。各操作的 p95 依實際開始到完整讀完 HTTP 回應本文計算。計時結束後核對 PostgreSQL 的主檔、版本、明細、快照與操作歷程。成功寫入必須同時有 HTTP 成功回應、完整落庫與一致的版本及更新時間。未取得資料庫核對結果時，寫入數顯示 `unverified`。預熱與正式量測都會更新既有資料，請購與明細總數保持 10,000 與 50,000。
+
+CSV 使用全新的測試庫。合法申請人有 10,000 張符合日期、部門與狀態篩選的送審單。另放入一張同部門、同條件但屬於他人的單，以及本人日期與狀態不符的各一張單。測試從請求開始計到完整接收下載，並逐列核對七欄、唯一單號、篩選與權限。含逗號、引號、換行的舊資料樣本和公式前綴也會核對。CSV 另行執行，時間上限為 5 秒。
+
+### 2026-11-06 ARM64 實測
+
+主機為 Apple M3（8 核）、24 GiB RAM、macOS 27.0.1。OrbStack 的 Linux ARM64 Docker VM 提供 8 vCPU 與約 11.73 GiB RAM，容器無個別 CPU 或記憶體配額。Docker Engine 29.8.2、Compose 5.5.0、PostgreSQL 18.6、.NET SDK 10.0.403、ASP.NET Core 與 EF Core 10.0.14、Npgsql 及其 EF Core provider 10.0.3、xUnit 2.9.3。
+
+兩輪獨立 CSV 完整接收分別為 **106.20 毫秒**與 **109.11 毫秒**，每次接收 1,529,000 bytes。兩輪均核對 10,000 筆唯一資料及全部欄值，排除 3 張哨兵單。同部門的他人單據，原申請人查明細回 404，實際所有人查明細回 200 且能以相同條件匯出該筆資料。
+
+修正版兩輪皆從 PostgreSQL 核對 10,000 張請購與 50,000 筆明細，逐單恰有五筆。每輪預熱的 1,800 筆與正式的 9,000 筆都送出並完整接收，且無拒絕、衝突或錯誤。預熱的 360 筆寫入與正式的 1,800 筆寫入全數對帳成功。兩輪皆在量測期間暫時防止主機閒置休眠。
+
+修正版第一輪的 300 個單秒區間各實送 30 筆，但有一個時槽落後 53.352 毫秒，超過 33.333 毫秒的排程檢查上限，該輪未通過。第二輪同樣每秒實送 30 筆，最大排程落後 13.842 毫秒，通過完整基準。下表只列正式量測。兩輪的預定、實送、完成及 HTTP 成功數相同。
+
+| 操作 | 各輪請求數 | 各輪成功寫入 | p95 上限 | 第一輪 p95 | 第二輪 p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 清單 | 4,500 | — | 500 ms | 20.39 ms | 20.06 ms |
+| 明細 | 1,800 | — | 500 ms | 9.94 ms | 9.83 ms |
+| 統計 | 900 | — | 1,000 ms | 10.62 ms | 10.67 ms |
+| 草稿保存 | 900 | 900 | 1,000 ms | 3.71 ms | 3.70 ms |
+| 送審 | 450 | 450 | 1,000 ms | 17.53 ms | 18.65 ms |
+| 合法審核 | 450 | 450 | 1,000 ms | 17.63 ms | 17.26 ms |
+
+較早兩輪曾因測試器排程落後，單秒實送分別落在 21–39 與 29–31 筆。這兩輪雖送足總量，僅供診斷。以上通過結果限本機 ARM64 的指定資料量、角色分布與請求組合。其他平台與更高容量尚待量測。
+
 ## 管理員復原與展示重設
 
 CLI 復原的自動化案例由正式 `recover-admin` 子程序及 HTTP 驗證。測試使用下方的隔離 PostgreSQL，涵蓋解除鎖定、舊密碼和多個舊登入失效、新密碼可登入、業務登入保留，以及輸出失敗時回滾。

@@ -14,4 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
     <ProjectReference Include="../backend/Procurement.Api.csproj" />
   </ItemGroup>
+  <ItemGroup Condition="'$(RunPerformanceBenchmarks)' != 'true'">
+    <Compile Remove="Benchmarks/**/*.cs" />
+  </ItemGroup>
 </Project>

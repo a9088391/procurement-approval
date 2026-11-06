@@ -181,6 +181,10 @@ Cookie 驗證與寫入操作都使用 PostgreSQL 帳號列鎖。端點在自己�
 
 送審、撤回、簽核及有限改派沿用同一把組織交易鎖，與管理撤權依提交順序生效。取得組織鎖後才重查操作者的登入、角色、資料版本及當前指派。申請人的帳號列鎖也和草稿保存及刪除共用，讓撤回、保存與重送依序生效。撤回與首關決定競爭時，先提交的結果會使落後操作的版本、狀態或可見範圍失效。每次寫入在同一筆交易保存狀態、版本及歷程，送審時同時保存新快照。改派在同一筆交易保存有效指派、請購版本與改派歷程，原待審關卡及原快照保留。查閱沿用相同鎖序，讓明細的摘要、快照與歷程對應同一狀態。
 
+## 效能測試邊界
+
+`compose.benchmark.yaml` 使用 `Dockerfile` 的 `backend-runtime` 建置 Release API，並連接專用 PostgreSQL。負載工具位於 `tests/Benchmarks/`，需明確設定 `RunPerformanceBenchmarks=true` 才會編入測試。這組工具在隔離資料庫準備資料和核對持久化結果，實際量測則走同一套 Kestrel、登入、授權和業務端點。重跑步驟與數據見[指定 HTTP 負載與獨立 CSV 匯出](testing.md#指定-http-負載與獨立-csv-匯出)。
+
 ## 固定工具鏈與開發
 
 SDK `10.0.403`，ASP.NET Core／Identity／EF `10.0.14`，Npgsql EF provider `10.0.3`，PostgreSQL `18.6`。`global.json` 禁止 SDK roll-forward，NuGet lock files 固定相依；Npgsql 要求 EF `[10.0.4, 11.0.0)`，目前固定版本符合。
