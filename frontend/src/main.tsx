@@ -15,9 +15,11 @@ import {
   type ApprovalReadback,
 } from "./RequisitionApprovals";
 import { RequisitionDrafts } from "./RequisitionDrafts";
+import { RequisitionReports } from "./RequisitionReports";
 import "./style.css";
 
 type Operation = "login" | "change-password" | "logout";
+type BusinessPanel = "drafts" | "approvals" | "reports";
 
 const roleNames: Record<string, string> = {
   Administrator: "管理員",
@@ -54,7 +56,7 @@ function App() {
   // 只跨畫面保留待核對的識別、版本及結果；請購資料本身隨受保護面板卸載。
   const [approvalContext, setApprovalContext] = useState<{
     actor: string;
-    active: boolean;
+    panel: BusinessPanel;
     readbacks: Record<string, ApprovalReadback>;
   } | null>(null);
   // 改派讀回只跨同一管理帳號保留，畫面失效時仍卸載原待辦資料及表單。
@@ -73,6 +75,10 @@ function App() {
   // 記錄身分重驗是否來自受保護端點拒絕，以便清除過期指引。
   const protectedRecovery = useRef(false);
   const actorName = identity?.userName;
+  // 面板選擇與待核對的簽核結果只屬於目前帳號。
+  const currentApproval =
+    approvalContext?.actor === actorName ? approvalContext : null;
+  const businessPanel = currentApproval?.panel ?? "drafts";
 
   // 受保護請求使用目前身分的記憶體權杖，固定回呼避免重新啟動清單讀取。
   const getProtectedToken = useCallback(() => token.current, []);
@@ -189,16 +195,17 @@ function App() {
   }
 
   // 切換請購面板前尊重草稿的離開確認，保留同一帳號的未決寫入。
-  function switchBusinessPanel(active: boolean) {
+  function switchBusinessPanel(panel: BusinessPanel) {
     // 共用閘門仍由目前的讀寫持有時，不能卸載操作中的面板。
-    if (busy.current || !actorName) return;
-    if (!canLeaveDraft()) return;
+    if (busy.current || businessPanel === panel) return;
+    // 使用者可取消關閉有未保存修改的草稿，並留下未決的寫入提示供讀回。
+    if (!actorName || !canLeaveDraft()) return;
     rememberUnknownDraft();
     setApprovalContext(
       // 只有相同帳號的未決操作能跨面板保留。
       (current) => ({
         actor: actorName,
-        active,
+        panel,
         readbacks: current?.actor === actorName ? current.readbacks : {},
       }),
     );
@@ -452,9 +459,7 @@ function App() {
     }
   }
 
-  // 只允許目前身分採用面板選擇；暫時未驗證時不掛載請購資料。
-  const approvalActive =
-    approvalContext?.actor === actorName && approvalContext?.active === true;
+  // 只允許目前管理帳號採用其面板選擇及待核對結果。
   const currentReassignment =
     reassignmentContext?.actor === actorName ? reassignmentContext : null;
   const reassignmentActive = currentReassignment?.active === true;
@@ -465,7 +470,7 @@ function App() {
       <header>
         <p className="eyebrow">本機展示</p>
         <h1>請購簽核</h1>
-        <p>登入、請購草稿、簽核與組織管理</p>
+        <p>登入、請購草稿、簽核、統計與組織管理</p>
       </header>
       {message || unknownResult ? (
         // 合併一般與未知結果提示；未知結果即使沒有新錯誤仍須以警示呈現。
@@ -683,13 +688,11 @@ function App() {
                 <button
                   type="button"
                   className="secondary"
-                  aria-pressed={!approvalActive}
+                  aria-pressed={businessPanel === "drafts"}
                   disabled={pending}
                   onClick={
-                    // 已在草稿畫面時維持原表單及焦點。
-                    () => {
-                      if (approvalActive) switchBusinessPanel(false);
-                    }
+                    // 選擇草稿畫面，重按已選的面板保留原表單。
+                    () => switchBusinessPanel("drafts")
                   }
                 >
                   本人請購草稿
@@ -697,19 +700,38 @@ function App() {
                 <button
                   type="button"
                   className="secondary"
-                  aria-pressed={approvalActive}
+                  aria-pressed={businessPanel === "approvals"}
                   disabled={pending}
                   onClick={
-                    // 切換前讓原草稿畫面處理離開確認。
-                    () => {
-                      if (!approvalActive) switchBusinessPanel(true);
-                    }
+                    // 簽核畫面沿用業務面板的離開與未決結果保護。
+                    () => switchBusinessPanel("approvals")
                   }
                 >
                   請購查閱與簽核
                 </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-pressed={businessPanel === "reports"}
+                  disabled={pending}
+                  onClick={
+                    // 從草稿進入報表也須遵循相同的離開確認。
+                    () => switchBusinessPanel("reports")
+                  }
+                >
+                  請購統計與 CSV
+                </button>
               </nav>
-              {approvalActive && approvalContext ? (
+              {businessPanel === "reports" ? (
+                <RequisitionReports
+                  key={identity.userName}
+                  getToken={getProtectedToken}
+                  pending={pending}
+                  beginOperation={beginOperation}
+                  finishOperation={finishOperation}
+                  onSessionInvalid={recoverProtectedSession}
+                />
+              ) : businessPanel === "approvals" && currentApproval ? (
                 <RequisitionApprovals
                   key={identity.userName}
                   getToken={getProtectedToken}
@@ -717,7 +739,7 @@ function App() {
                   beginOperation={beginOperation}
                   finishOperation={finishOperation}
                   onSessionInvalid={recoverProtectedSession}
-                  readbacks={approvalContext.readbacks}
+                  readbacks={currentApproval.readbacks}
                   onReadbackChange={markApprovalWrite}
                 />
               ) : (

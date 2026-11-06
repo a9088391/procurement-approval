@@ -164,6 +164,37 @@ export interface RequisitionSummaryDto extends DraftSummaryDto {
   } | null;
 }
 
+// 報表只包含送審中的案件與結案，不以草稿或撤回狀態篩選。
+export const submittedStatuses = [
+  "manager_pending",
+  "finance_pending",
+  "approved",
+  "rejected",
+] as const;
+
+type SubmittedStatus = (typeof submittedStatuses)[number];
+
+export interface RequisitionReportCriteria {
+  startDate: string;
+  endDate: string;
+  departmentId: string;
+  status: string;
+}
+
+interface RequisitionStatisticsDto {
+  groups: {
+    department: NonNullable<RequisitionSummaryDto["round"]>["department"];
+    status: SubmittedStatus;
+    count: number;
+    estimatedAmount: number;
+  }[];
+}
+
+type SubmittedRequisitionDto = RequisitionSummaryDto & {
+  status: SubmittedStatus;
+  round: NonNullable<RequisitionSummaryDto["round"]>;
+};
+
 // 明細另含已保存內容及歷程；送審後的內容、人選和部門取自該輪快照。
 export interface RequisitionDetailDto extends RequisitionSummaryDto {
   purpose: string | null;
@@ -219,6 +250,16 @@ export class ApiError extends Error {
     // 交由 Error 保存訊息，供一般錯誤處理與畫面共用。
     super(message);
   }
+}
+
+// 讀寫共用身分恢復；強制改密碼可能在驗證配對權杖前先回 403。
+export function requiresSessionCheck(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 ||
+      error.status === 403 ||
+      error.code === "invalid_csrf")
+  );
 }
 
 // 共用同源及逾時設定；呼叫端提供 signal 時，由呼叫端管理取消期限。
@@ -390,6 +431,66 @@ export async function readRequisitions(
       headers: { "X-CSRF-TOKEN": token },
     })
   ).json();
+}
+
+// 三個報表入口使用同一組參數，空欄省略，且無條件時也只查已送審的請購。
+function reportQuery(criteria: RequisitionReportCriteria) {
+  const query = new URLSearchParams({ scope: "submitted" });
+  for (const [name, value] of Object.entries(criteria)) {
+    if (value) query.set(name, value);
+  }
+  return query;
+}
+
+// 清單與統計彼此獨立，並行使用同一組條件和登入權杖，再一起交給畫面。
+export async function readRequisitionReport(
+  token: string,
+  criteria: RequisitionReportCriteria,
+  signal?: AbortSignal,
+) {
+  // 兩個受保護 GET 共用權杖及期限；同源 Cookie 切換時仍須驗證配對。
+  const query = reportQuery(criteria);
+  const options = {
+    signal: signal ?? AbortSignal.timeout(15000),
+    headers: { "X-CSRF-TOKEN": token },
+  };
+  const [listResponse, statisticsResponse] = await Promise.allSettled([
+    request(`${requisitionPath}?${query}`, options),
+    request(`${requisitionPath}/statistics?${query}`, options),
+  ]);
+
+  // 等待兩個結果，優先交由 App 處理身分拒絕，避免先發生的傳輸錯誤遮蔽它。
+  for (const result of [listResponse, statisticsResponse]) {
+    if (result.status === "rejected" && requiresSessionCheck(result.reason))
+      throw result.reason;
+  }
+  if (listResponse.status === "rejected") throw listResponse.reason;
+  if (statisticsResponse.status === "rejected") throw statisticsResponse.reason;
+
+  // 等兩個內容都可解讀才交回結果，避免一邊成功時顯示不完整的報表。
+  const [list, statistics]: [
+    SubmittedRequisitionDto[],
+    RequisitionStatisticsDto,
+  ] = await Promise.all([
+    listResponse.value.json(),
+    statisticsResponse.value.json(),
+  ]);
+  return { list, groups: statistics.groups };
+}
+
+// 匯出同樣要驗證畫面權杖與目前 Cookie，成功後才把 CSV 交給下載動作。
+export async function readRequisitionCsv(
+  token: string,
+  criteria: RequisitionReportCriteria,
+) {
+  // 檢查內容類型，避免把錯誤頁或其他成功回應當成匯出檔案。
+  const response = await request(
+    `${requisitionPath}/csv?${reportQuery(criteria)}`,
+    { headers: { "X-CSRF-TOKEN": token } },
+  );
+  if (!response.headers.get("Content-Type")?.startsWith("text/csv"))
+    throw new Error("無法辨識請購 CSV 回應。");
+  return response.blob();
 }
 
 // 明細及歷程由同一個已授權回應取得，且同時提供下一次操作需要的版本。

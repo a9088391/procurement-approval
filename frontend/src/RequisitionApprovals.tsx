@@ -4,6 +4,7 @@ import {
   ApiError,
   readRequisition,
   readRequisitions,
+  requiresSessionCheck,
   writeApproval,
   type ApprovalAction,
   type RequisitionDetailDto,
@@ -29,7 +30,7 @@ export interface ApprovalReadback {
   confirmed?: ApprovalAction;
 }
 
-const statusNames = {
+export const statusNames = {
   draft: "草稿",
   withdrawn: "撤回修改中",
   manager_pending: "主管待審",
@@ -58,16 +59,6 @@ const writeRejections = new Set([
   "reviewers_unavailable",
 ]);
 
-// 讀寫共用身分恢復；強制改密碼可能在驗證配對權杖前先回 403。
-function requiresSessionCheck(error: unknown): error is ApiError {
-  return (
-    error instanceof ApiError &&
-    (error.status === 401 ||
-      error.status === 403 ||
-      error.code === "invalid_csrf")
-  );
-}
-
 // 一般請購使用同一查無錯誤表示不存在或不可見，兩者都不得留下原明細。
 function unavailable(error: unknown) {
   return (
@@ -78,7 +69,7 @@ function unavailable(error: unknown) {
 }
 
 // 所有輪次時間以展示環境的臺灣時區呈現，同時保留原機器可讀時間。
-function RequisitionTime({ value }: { value: string }) {
+export function RequisitionTime({ value }: { value: string }) {
   return <time dateTime={value}>{dateFormat.format(new Date(value))}</time>;
 }
 

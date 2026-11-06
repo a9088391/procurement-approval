@@ -159,11 +159,13 @@ dd {
 /* 請購面板維持單欄，長主旨和單號可換行，操作按鈕於窄畫面自動換列。 */
 .requisition-drafts,
 .requisition-approvals,
+.requisition-reports,
 .reassignments {
   overflow-wrap: anywhere;
 }
 
-.reassignments select {
+.reassignments select,
+.requisition-reports select {
   text-overflow: ellipsis;
 }
 

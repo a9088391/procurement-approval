@@ -6,10 +6,14 @@ internal static class RequisitionApprovalEndpoints
     // 以獨立動作表示合法操作，讓客戶端無法指定關卡或任意目標狀態。
     internal static void MapRequisitionApprovalEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        // 清單、明細與歷程交給同一個服務，套用相同的資料可見範圍。
+        // 清單、報表、明細及歷程交給同一個服務；查詢字串由服務完成授權後再驗證。
         var requisitions = endpoints.MapGroup("/api/requisitions");
         requisitions.MapGet("", (HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
-            service.List(http.User, ct));
+            service.ReadCollection(http.Request.Query, http.User, RequisitionReadKind.List, ct));
+        requisitions.MapGet("/statistics", (HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
+            service.ReadCollection(http.Request.Query, http.User, RequisitionReadKind.Statistics, ct));
+        requisitions.MapGet("/csv", (HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
+            service.ReadCollection(http.Request.Query, http.User, RequisitionReadKind.Csv, ct));
         requisitions.MapGet("/{id}", (string id, HttpContext http, RequisitionApprovalService service, CancellationToken ct) =>
             service.Read(id, http.User, ct));
 

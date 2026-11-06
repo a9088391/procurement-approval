@@ -13,6 +13,7 @@
 - `backend/RequisitionDraftService.cs` 集中本人草稿查詢、版本和交易。`RequisitionDraftInput.cs` 驗證內容及計算金額，`Requisition.cs` 定義主檔、明細及 EF 對應。
 - `backend/RequisitionApprovalEndpoints.cs` 與 `RequisitionApprovalContracts.cs` 定義簽核、查閱與有限改派 API 及公開 DTO。
 - `backend/RequisitionApprovalService.cs` 集中查閱授權、有效指派、資格、版本與關卡轉換。有限改派沿用組織服務的管理身分與交易邊界。`RequisitionRound.cs` 定義送審快照、歷程及資料庫約束。
+- `backend/RequisitionReporting.cs` 定義共用篩選、統計 DTO 與 CSV 編碼。`RequisitionApprovalService.cs` 用同一個可見查詢及最新送審範圍投影清單、統計及匯出。
 - `backend/LocalSetup.cs`：本機憑證檔與補充式初始化，不提供 HTTP 維護端點。
 - `backend/Migrations/`：以固定版本 EF CLI 產生的 schema 與模型快照。
 
@@ -114,6 +115,31 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 本人可查閱自己的全部請購。只有本人可查草稿與撤回修改中的單，也只有本人可查舊輪次。主管可查目前部門審核中或已結案的單及最新一輪有效指派給本人的單。財務以最新一輪的主管核准事件判斷是否已進財務關。角色範圍可合併，同一張單仍須有三位不同的申請人、主管及財務。其他業務帳號獲准時只會取得最新一輪的資料與歷程。能查閱的業務帳號只有在輪到本人且資格符合時才可作出決定。
 
 送審和重送都重新驗證本人已保存的可編輯內容、申請人部門及兩位預設審核人的資格。送審部門採當次既有歸屬，部門停用保留歷史關聯。舊帳號尚未分配部門時，系統保留目前內容，管理員先補上部門才可送審。寫入只接受目前版本，欄位、狀態及指派都由伺服器決定。版本過期、狀態不符或資格不足時保留資料，請依回應讀回最新明細。回應遺失或收到 500 時應先讀回，避免重複提交。
+
+## 請購統計與 CSV API
+
+三個 GET 沿用請購查閱的業務身分、目前授權與 Cookie／權杖配對。成功回應皆為 `200` 且帶 `Cache-Control: no-store`。
+
+| 端點 | 回應 |
+| --- | --- |
+| `GET /api/requisitions?scope=submitted` | 沿用請購清單的摘要陣列和排序，範圍為最新送審輪次且目前在待審或結案狀態的資料 |
+| `GET /api/requisitions/statistics` | `{ "groups": [...] }`，每組包含 `department`（`id`、`name`）、`status`、`count` 與 TWD `estimatedAmount` |
+| `GET /api/requisitions/csv` | `text/csv; charset=utf-8`，附件檔名 `requisitions.csv`，資料列順序與對應清單相同 |
+
+三個端點接受相同的選用查詢參數。
+
+| 參數 | 格式與行為 |
+| --- | --- |
+| `scope` | 指定時須為 `submitted`。統計與 CSV 預設採送審範圍。清單若帶任一報表參數，也採送審範圍。原本不帶報表參數的清單仍含本人草稿及撤回單 |
+| `startDate`、`endDate` | `YYYY-MM-DD` 臺灣曆日，可單獨使用。包含起日零時、排除迄日翌日零時。可表示的界線最早起日為 `0001-01-02`，最晚迄日為 `9999-12-30` |
+| `departmentId` | 最新輪次的送審部門識別，32 位十六進位字元。格式正確但沒有可見資料時回傳空結果 |
+| `status` | `manager_pending`、`finance_pending`、`approved` 或 `rejected`。暫停維持原待審狀態 |
+
+伺服器先確認身分，適用既有的 `401`、`403` 及 `400 invalid_csrf` 錯誤。已授權請求若含空值、重複值、格式錯誤或起日大於迄日，回 `400 invalid_input`。三個端點各自依目前權限、狀態及最新輪次查詢。空集合回空陣列、空 `groups` 或僅表頭的 CSV。
+
+統計依穩定部門識別與目前狀態計數、以十進位加總 TWD。更名後仍屬同一部門，群組名稱取自符合條件的最新可見送審快照。逐單清單和 CSV 各用該單送審時的名稱。
+
+CSV 採 UTF-8 BOM、逗號與 CRLF，每單一列。欄位依序為單號、主旨、申請人顯示名稱（沿用清單的 `userName`）、送審部門、目前狀態、TWD 預估金額、最近送審時間。金額固定兩位小數，送審時間為帶臺灣時差的 ISO 8601。使用者文字欄位用雙引號包覆，欄內雙引號成對編碼。可能被辨識為公式的文字只在輸出的副本加單引號。報表讀取完成後才在交易之外寫入 CSV 回應。
 
 ## 有限改派 API
 

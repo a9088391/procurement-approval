@@ -1,5 +1,29 @@
 # 測試與驗證
 
+## 請購統計與 CSV
+
+使用下方的隔離 [HTTP 與資料庫](#http-與資料庫) 及 [瀏覽器](#前端與瀏覽器) 環境。可定向執行報表案例。
+
+```sh
+docker compose -p procurement-approval-test -f compose.test.yaml run --rm tests dotnet test tests/Procurement.IntegrationTests.csproj -c Release --filter FullyQualifiedName~RequisitionReportingTests
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep '請購統計與 CSV'
+```
+
+HTTP 案例透過 PostgreSQL 核對臺灣日界線、調部門及重送、角色聯集、改派與撤權、精確 TWD 合計及相同條件下的清單和七欄 CSV。CSV 由支援引號、逗號和換行的解析器讀取。由於正式寫入要求匯出的文字欄位為單行，換行測試只在隔離資料庫為該案例安排舊資料樣本，仍經正式 API 下載並查回原文。
+
+2026-11-06 在 macOS ARM64、PostgreSQL 18.6 及 .NET SDK 10.0.403 驗證。定向報表測試 **6／6**，完整 Release HTTP **182／182**，另一個從空白啟動的資料庫獨立重跑也是 **182／182**。鎖定還原、Release 建置、格式與 EF 模型一致性檢查通過。
+
+隔離 Chromium（Playwright 1.64.1）最終分批共 **35／35**，包含報表篩選與實際下載、兩個同名送審部門、保留同一登入時的即時撤權，以及另一分頁換帳號後的防偽拒絕。傳輸失敗案例由瀏覽器測試刻意中斷請求，驗證重讀走真實 API，且較晚的真實防偽拒絕仍會觸發身分恢復。已檢查 390／1280 px 版面及鍵盤焦點，TypeScript、Vite 與 Prettier 通過。
+
+隔離 Compose 使用舊版先送審，再從同一資料卷升級。既有登入和原送審明細可讀取，清單、統計與匯出都包含原單。執行 `initialize-demo` 並停止、重啟網站及 PostgreSQL 後，原登入及新登入仍能讀回相同資料，CSV 位元組相同。另以 LibreOffice Calc 26.8 開發版啟用公式匯入，未防護的 `=1+1` 對照組被辨識為公式，實際 HTTP 匯出中的合成主旨保留文字。試算表結果限該次 Calc 匯入，負載與萬筆匯出耗時另行量測。
+
+### 手動驗證
+
+1. 依 [送審步驟](../README.md#送審與兩關簽核) 建立並送出一張已知預估金額的單，保留另一張未送審草稿。登入業務帳號，開啟「請購統計與 CSV」。用該單的臺灣送審日、部門及目前狀態套用條件，核對單號、件數與金額。草稿留在本人草稿入口。
+2. 下載 CSV，核對只有七欄且與清單單號一致。可用含中文、逗號、雙引號或以 `=1+1` 開頭的合成主旨核對匯出。試算表應以文字顯示公式樣本，回到請購明細應看到原始主旨。
+3. 由兩關依序核准後，將「目前狀態」切為「核准結案」再套用條件，確認該單的金額標為「已核准的預估申請金額」。在另一分頁切換帳號後，原報表的下一次讀取或下載應要求重新確認身分。管理帳號使用管理功能，沒有報表入口。
+
 ## 有限改派與待辦恢復實測
 
 2026-11-06 在 macOS ARM64、Docker Compose 5.5.0、固定 .NET SDK 10.0.403 及隔離 PostgreSQL 18.6 完成 Release HTTP 整合套件，**176／176 通過**。另在空白的獨立測試庫套用正式遷移後重跑，同樣 **176／176 通過**。涵蓋改派欄位隔離、未完成資格補齊、舊指派即時撤權、雙管理員競爭、改派與審核及撤權與審核的兩種提交順序，以及提交失敗時回滾指派、版本及歷程。鎖定還原、Release 建置、兩個 .NET 專案的格式檢查及 EF 模型一致性均通過。
@@ -137,15 +161,17 @@ docker compose -p procurement-approval-browser -f compose.yaml -f compose.browse
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-drafts.spec.ts
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
-docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep-invert '有限改派'
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep-invert '有限改派|請購統計與 CSV'
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep '有限改派'
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml restart app
+docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml run --rm e2e npm run test:e2e -- e2e/requisition-approvals.spec.ts --grep '請購統計與 CSV'
 docker compose -p procurement-approval-browser -f compose.yaml -f compose.browser.yaml down
 ```
 
 最後一個命令只停止並移除隔離瀏覽器容器／網路，保留 volume 及憑證，不加 `--volumes`。不能把專案名稱或掛載目錄改成展示環境。測試 fail-closed 檢查目標 URL、環境標記及憑證權限，使用 Chromium、單一 worker，不自動重試；trace、video 與自動失敗截圖關閉。手動截圖只保存遮罩後的畫面到忽略的本機證據目錄；不得複製 Cookie、密碼或請求本文至測試輸出。
 
-每個批次開始前用 `restart app` 重建隔離網站的記憶體節流計數，沿用同一資料卷、帳號與金鑰。分批驗證登入／組織管理、草稿、既有簽核與有限改派，避免合計的登入嘗試超過同來源每分鐘 30 次的正式限制。
+每個批次開始前用 `restart app` 重建隔離網站的記憶體節流計數，沿用同一資料卷、帳號與金鑰。分批驗證登入／組織管理、草稿、既有簽核、有限改派與報表，避免合計的登入嘗試超過同來源每分鐘 30 次的正式限制。
 
 真 API 流程涵蓋四種示範身分類別、錯誤帳密後修正、登出及重新載入、錯誤目前密碼後修正、改密碼成功回登入、舊密碼拒絕／新密碼登入、另一個舊登入失效。密碼測試最後只把隔離 `manager` fixture 改回原值，便於重跑，不重設資料庫。
 

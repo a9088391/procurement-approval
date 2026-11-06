@@ -11,9 +11,97 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
     private const string FinanceRole = "Finance";
     private static readonly string[] DecisionKinds = [Requisition.Approved, Requisition.Rejected];
 
-    // 列出本人及目前業務角色可見的請購，清單不載入逐筆明細。
-    internal Task<IResult> List(ClaimsPrincipal principal, CancellationToken ct) => RunAsBusiness(principal, async (actor, roles) =>
-        Results.Ok(await Visible(actor, roles).ToArrayAsync(ct)), ct);
+    // 一般清單保留本人草稿及撤回單；送審清單、統計及匯出共用同一份可組合的送審查詢。
+    internal Task<IResult> ReadCollection(IQueryCollection query, ClaimsPrincipal principal, RequisitionReadKind kind, CancellationToken ct) =>
+        RunAsBusiness(principal, async (actor, roles) =>
+        {
+            // 使用鎖內取得的業務身分，無權查詢者不會取得參數錯誤或探知組織資料。
+            if (RequisitionReportFilter.Read(query) is not { } filter)
+                return AuthService.Error(400, "invalid_input", "請確認送審範圍、日期、部門及狀態篩選條件。");
+
+            // 所有可見條件及報表篩選都在 PostgreSQL 投影及載入欄位之前執行。
+            var visible = VisibleWorkflows(actor, roles);
+            if (kind != RequisitionReadKind.List || filter.SubmittedOnly)
+                visible = SubmittedWorkflows(visible, filter);
+
+            // 依用途投影所需欄位，不在統計或匯出中載入內容快照及完整歷程。
+            return kind switch
+            {
+                RequisitionReadKind.Statistics => await Statistics(visible, ct),
+                RequisitionReadKind.Csv => await Download(visible, ct),
+                _ => Results.Ok(await Summaries(visible, actor, roles).ToArrayAsync(ct))
+            };
+        }, ct);
+
+    // 只在目前已送審狀態使用最新輪次條件；不以已送審過或曾經到過的狀態納入舊輪。
+    private static IQueryable<CurrentWorkflow> SubmittedWorkflows(IQueryable<CurrentWorkflow> visible, RequisitionReportFilter filter)
+    {
+        // 確認最新輪存在，再依篩選條件限制同一輪的部門、狀態及送審時間。
+        visible = visible.Where(w => w.Submitted && w.Round != null);
+        if (filter.StartUtc is { } start)
+            visible = visible.Where(w => w.Round!.SubmittedAt >= start);
+        if (filter.EndUtcExclusive is { } end)
+            visible = visible.Where(w => w.Round!.SubmittedAt < end);
+        if (filter.DepartmentId is { } department)
+            visible = visible.Where(w => w.Round!.DepartmentId == department);
+        if (filter.Status is { } status)
+            visible = visible.Where(w => w.Draft.Status == status);
+        return visible;
+    }
+
+    // 統計先在資料庫計算各送審部門名稱的明細小計，再依穩定識別合併更名前後資料。
+    private static async Task<IResult> Statistics(IQueryable<CurrentWorkflow> submitted, CancellationToken ct)
+    {
+        // 只接受已確認具有最新輪的查詢；主檔金額在已送審狀態不可修改，與當輪快照一致。
+        var subtotals = await submitted
+            .GroupBy(w => new { w.Round!.DepartmentId, w.Round.DepartmentName, w.Draft.Status })
+            .Select(group => new
+            {
+                group.Key,
+                Count = group.Count(),
+                EstimatedAmount = group.Sum(w => w.Draft.EstimatedAmount),
+                Latest = group.Max(w => w.Round!.SubmittedAt)
+            })
+            .ToArrayAsync(ct);
+
+        // 名稱取自篩選後本來就可見的最新快照；同時送審時按名稱決定順序，避免查到未授權的快照。
+        var groups = subtotals
+            .GroupBy(row => row.Key.DepartmentId)
+            .OrderBy(department => department.Key, StringComparer.Ordinal)
+            .SelectMany(department =>
+            {
+                // 同部門各狀態都使用同一個顯示名稱，件數及金額不因部門更名而分開。
+                var name = department
+                    .OrderByDescending(row => row.Latest)
+                    .ThenBy(row => row.Key.DepartmentName, StringComparer.Ordinal)
+                    .First()
+                    .Key.DepartmentName;
+                var label = new RequisitionDepartment(department.Key, name);
+                return department
+                    .GroupBy(row => row.Key.Status)
+                    .OrderBy(status => status.Key, StringComparer.Ordinal)
+                    .Select(status => new RequisitionStatisticsGroup(label, status.Key,
+                        status.Sum(row => row.Count), status.Sum(row => row.EstimatedAmount ?? 0m)));
+            })
+            .ToArray();
+        return Results.Ok(new RequisitionStatistics(groups));
+    }
+
+    // 匯出只取得七個欄位，依相同清單排序，並在交易釋鎖後才格式化及寫入回應。
+    private async Task<IResult> Download(IQueryable<CurrentWorkflow> submitted, CancellationToken ct)
+    {
+        // 申請人顯示名稱沿用清單的帳號欄位；不把額外個資、操作資格及歷程載入記憶體。
+        var rows = await (
+            from workflow in submitted
+            let draft = workflow.Draft
+            let round = workflow.Round!
+            join applicant in db.Users on draft.ApplicantId equals applicant.Id
+            orderby draft.UpdatedAt descending, draft.Id
+            select new RequisitionCsvRow(draft.Number, draft.Subject, applicant.UserName ?? "", round.DepartmentName,
+                draft.Status, draft.EstimatedAmount, round.SubmittedAt))
+            .ToArrayAsync(ct);
+        return new RequisitionCsvDownload(rows);
+    }
 
     // 明細與歷程一起回傳，兩者使用和清單相同的授權範圍。
     internal Task<IResult> Read(string id, ClaimsPrincipal principal, CancellationToken ct) =>
@@ -290,6 +378,10 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 .DefaultIfEmpty()
             let waitingManager = draft.Status == Requisition.ManagerPending
             let waitingFinance = draft.Status == Requisition.FinancePending
+            let submitted = waitingManager
+                || waitingFinance
+                || draft.Status == Requisition.Approved
+                || draft.Status == Requisition.Rejected
             let managerId = round.ManagerReplacementId ?? round.ManagerId
             let financeId = round.FinanceReplacementId ?? round.FinanceId
             join manager in db.Users on managerId equals manager.Id into managers
@@ -305,6 +397,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 Round = round,
                 WaitingManager = waitingManager,
                 WaitingFinance = waitingFinance,
+                Submitted = submitted,
                 Paused = paused,
                 ManagerId = managerId,
                 FinanceId = financeId,
@@ -320,6 +413,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
         public RequisitionRound? Round { get; init; }
         public bool WaitingManager { get; init; }
         public bool WaitingFinance { get; init; }
+        public bool Submitted { get; init; }
         public bool Paused { get; init; }
         public required string ManagerId { get; init; }
         public required string FinanceId { get; init; }
@@ -327,8 +421,8 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
         public required string FinanceName { get; init; }
     }
 
-    // 集中定義可見範圍與待辦提示，讓單筆查詢和清單使用同一個 PostgreSQL 查詢。
-    private IQueryable<RequisitionSummary> Visible(AppUser actor, string[] roles, Guid? id = null)
+    // 所有業務查詢使用同一個 PostgreSQL 可見條件；篩選及欄位投影不參與授權。
+    private IQueryable<CurrentWorkflow> VisibleWorkflows(AppUser actor, string[] roles, Guid? id = null)
     {
         // 他人草稿與撤回單不可見；主管部門、最新有效指派及財務進關各自保留授權來源。
         var manager = roles.Contains(ManagerRole);
@@ -337,11 +431,6 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             from workflow in CurrentWorkflows()
             let draft = workflow.Draft
             let round = workflow.Round
-            join applicant in db.Users on draft.ApplicantId equals applicant.Id
-            let submitted = workflow.WaitingManager
-                || workflow.WaitingFinance
-                || draft.Status == Requisition.Approved
-                || draft.Status == Requisition.Rejected
             let managerVisible = manager
                 && round != null
                 && (round.DepartmentId == actor.DepartmentId
@@ -354,10 +443,23 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
             where (id == null
                     || draft.Id == id)
                 && (draft.ApplicantId == actor.Id
-                    || (submitted
+                    || (workflow.Submitted
                         && (managerVisible
                             || financeVisible)))
-            // 只有目前具角色且被指派到當關的人可以決定，其他查閱授權不產生簽核權。
+            select workflow;
+    }
+
+    // 既有清單與明細仍使用相同摘要；只有目前被指派到當關且具角色的人可決定。
+    private IQueryable<RequisitionSummary> Summaries(IQueryable<CurrentWorkflow> visible, AppUser actor, string[] roles)
+    {
+        // 保留原有輸出、排序與操作資格，避免報表模式改變一般請購流程。
+        var manager = roles.Contains(ManagerRole);
+        var finance = roles.Contains(FinanceRole);
+        return
+            from workflow in visible
+            let draft = workflow.Draft
+            let round = workflow.Round
+            join applicant in db.Users on draft.ApplicantId equals applicant.Id
             let assigned = round != null
                 && ((workflow.WaitingManager
                         && manager
@@ -374,6 +476,10 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                     new RequisitionPerson(workflow.ManagerId, workflow.ManagerName),
                     new RequisitionPerson(workflow.FinanceId, workflow.FinanceName)));
     }
+
+    // 單筆讀取及寫入後讀回共用摘要投影，維持原有的資料與操作提示。
+    private IQueryable<RequisitionSummary> Visible(AppUser actor, string[] roles, Guid id) =>
+        Summaries(VisibleWorkflows(actor, roles, id), actor, roles);
 
     // 單號以外的公開識別須能解析，缺少或無權讀取時共用找不到的結果。
     private Task<RequisitionSummary?> FindVisible(AppUser actor, string[] roles, string id, CancellationToken ct) =>

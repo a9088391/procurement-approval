@@ -6,7 +6,7 @@
 docker compose -p procurement-approval up --build -d
 ```
 
-入口是 `http://127.0.0.1:5080`，API 與 React 前端同源。資料庫留在 Compose 內部網路。此設定只供本機 HTTP 展示。管理帳號可維護部門及業務帳號。業務帳號可管理本人草稿，並依當前資格查看或簽核請購。完整操作見 [README](../README.md)。
+入口是 `http://127.0.0.1:5080`，API 與 React 前端同源。資料庫留在 Compose 內部網路。此設定只供本機 HTTP 展示。管理帳號可維護部門及業務帳號。業務帳號可管理本人草稿，並依當前資格查看、簽核請購或使用請購統計與 CSV。完整操作見 [README](../README.md)。
 
 初始化程序建立 `.local/`，目錄權限 `0700`，隨機資料庫密碼及 `initial-accounts.json` 權限 `0600`。在本機編輯器開啟 `.local/initial-accounts.json`，取得 `admin`、`applicant`、`manager`、`finance` 的隨機初始密碼。不要貼到一般紀錄、截圖、聊天或公開文件。`admin` 是管理帳號，其餘是業務帳號；預載業務帳號已具備示範角色。首次送審前，由管理員為示範申請人設定部門及兩位預設審核人。
 

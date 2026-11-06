@@ -332,6 +332,7 @@ async function checkLayout(
       .getByRole("button")
       .or(region.getByRole("combobox"))
       .or(region.getByRole("textbox"))
+      .or(region.locator('input[type="date"]'))
       .all();
     for (const control of controls) {
       // 確認每個互動控制項都在有效的水平範圍內。
@@ -368,6 +369,583 @@ async function openActor(page: Page, role: Role) {
   await login(page, role);
   return approvals(page);
 }
+
+// 經實際篩選與瀏覽器下載核對同一批送審資料，再驗證同源換人後的拒絕與復原。
+test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資料", async ({
+  page,
+  context,
+  playwright,
+  request: admin,
+}) => {
+  const panelName = "請購統計與 CSV";
+  const subject = `報表-${runId}-${"LongSubject".repeat(15)}`;
+  const pendingSubject = `報表待審-${runId}`;
+  const otherSubject = `同名部門核准-${runId}`;
+  const draftSubject = `報表草稿-${runId}`;
+  const applicant = await playwright.request.newContext({ baseURL });
+  const manager = await playwright.request.newContext({ baseURL });
+  const finance = await playwright.request.newContext({ baseURL });
+  try {
+    // 使用正常 API 在原部門建立送審單、待審單及未送審草稿。
+    await apiLogin(applicant, actorName("applicant"), finalPassword);
+    const submitted = await seedPending(applicant, subject);
+    const waiting = await seedPending(applicant, pendingSubject);
+    const draft = await applicant.post("/api/requisitions/drafts", {
+      headers: { "X-CSRF-TOKEN": await csrf(applicant) },
+      data: { subject: draftSubject, lines: [] },
+    });
+    expect(draft.status()).toBe(201);
+    if (!submitted.round) throw new Error("報表測試缺少送審快照。");
+    const originalDepartmentId = submitted.round.department.id;
+
+    // 另一部門暫用同名，讓測試能辨識相同名稱、不同部門識別的兩個送審快照。
+    await apiLogin(admin, "admin", demoAccounts.admin);
+    const adminOptions = { headers: { "X-CSRF-TOKEN": await csrf(admin) } };
+    const created = await admin.post("/api/admin/departments", {
+      ...adminOptions,
+      data: { name: departmentName },
+    });
+    expect(created.status()).toBe(204);
+    const organization = await admin.get("/api/admin/organization");
+    expect(organization.status()).toBe(200);
+    const { departments }: OrganizationDto = await organization.json();
+    const clone = departments.find(
+      // 新部門與原部門共用名稱，必須比較識別才能選對。
+      ({ id, name }) => id !== originalDepartmentId && name === departmentName,
+    );
+    if (!clone) throw new Error("找不到報表測試的同名部門。");
+
+    // 每次從正式讀回取得帳號版本及現有設定，只改申請人的部門。
+    async function moveApplicant(departmentId: string) {
+      const settings = await admin.get("/api/admin/organization");
+      expect(settings.status()).toBe(200);
+      const { accounts }: OrganizationDto = await settings.json();
+      const account = accounts.find(
+        // 同一工作程序的合成申請人是唯一變更目標。
+        ({ userName }) => userName === actorName("applicant"),
+      );
+      if (!account) throw new Error("找不到報表測試的申請人。");
+      // 回送原設定與版本，讓調部門不改變目前資格或預設審核人。
+      const updated = await admin.post(`/api/admin/accounts/${account.id}`, {
+        ...adminOptions,
+        data: {
+          departmentId,
+          version: account.version,
+          active: account.active,
+          isManager: account.isManager,
+          isFinance: account.isFinance,
+          managerReviewerId: account.managerReviewerId,
+          financeReviewerId: account.financeReviewerId,
+        },
+      });
+      expect(updated.status()).toBe(204);
+    }
+
+    // 建立另一部門的送審快照後還原申請人歸屬；部門改名也不能覆寫快照。
+    await moveApplicant(clone.id);
+    let otherSubmitted: RequisitionDetailDto;
+    try {
+      otherSubmitted = await seedPending(applicant, otherSubject);
+    } finally {
+      await moveApplicant(originalDepartmentId);
+      const renamed = await admin.post(`/api/admin/departments/${clone.id}`, {
+        ...adminOptions,
+        data: {
+          name: `報表同名-${runId}`,
+          version: clone.version,
+          active: true,
+        },
+      });
+      expect(renamed.status()).toBe(204);
+    }
+
+    // 讓兩個同名部門各有一筆核准，避免遺漏部門參數時仍通過篩選測試。
+    await apiLogin(manager, actorName("manager"), finalPassword);
+    await apiLogin(finance, actorName("finance"), finalPassword);
+    const managerHeaders = { "X-CSRF-TOKEN": await csrf(manager) };
+    const financeHeaders = { "X-CSRF-TOKEN": await csrf(finance) };
+    for (const candidate of [submitted, otherSubmitted]) {
+      // 財務只能使用主管核准後取得的版本。
+      const path = `/api/requisitions/${candidate.id}/approve`;
+      const first = await manager.post(path, {
+        headers: managerHeaders,
+        data: { version: candidate.version },
+      });
+      expect(first.status()).toBe(200);
+      const second = await finance.post(path, {
+        headers: financeHeaders,
+        data: { version: (await first.json()).version },
+      });
+      expect(second.status()).toBe(200);
+    }
+
+    // 匿名不能進入報表；登入後仍須經請購面板與離開草稿確認。
+    const entry = page.getByRole("button", { name: panelName, exact: true });
+    await expect(entry).toHaveCount(0);
+    await login(page, "applicant");
+    await expect(entry).toBeVisible();
+    const drafts = page.getByRole("region", { name: "本人請購草稿" });
+    await drafts.getByRole("button", { name: "新增草稿", exact: true }).click();
+    const draftInput = drafts.getByLabel("主旨", { exact: true });
+    await draftInput.fill("尚未保存的報表測試");
+    page.once("dialog", (dialog) => {
+      // 取消後應保留已輸入的內容，且沒有掛載報表。
+      void dialog.dismiss();
+    });
+    await entry.click();
+    await expect(draftInput).toHaveValue("尚未保存的報表測試");
+    const report = page.getByRole("region", { name: panelName });
+    await expect(report).toHaveCount(0);
+    page.once("dialog", (dialog) => {
+      // 第二次明確同意離開草稿，報表才能取得讀取閘門。
+      void dialog.accept();
+    });
+    await entry.click();
+
+    // 確認初次讀取排除草稿，並從報表授權資料提供部門選項。
+    const filters = report.getByRole("form", { name: "報表條件" });
+    const apply = filters.getByRole("button", { name: "套用條件" });
+    const clear = filters.getByRole("button", { name: "清除條件" });
+    const exportCsv = report.getByRole("button", { name: "下載 CSV" });
+    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    const groups = report.getByRole("list", {
+      name: "依送審部門與目前狀態統計",
+    });
+    const department = filters.getByLabel("送審部門");
+    await expect(exportCsv).toBeEnabled();
+    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await expect(rowFor(rows, pendingSubject)).toContainText(waiting.number);
+    await expect(rows).not.toContainText(draftSubject);
+    await expect(department.locator("option")).toHaveCount(3);
+    await expect(department.locator('option[value=""]')).toHaveText("全部部門");
+    for (const id of [originalDepartmentId, clone.id]) {
+      // 下拉選項與核准群組都可區分同名部門。
+      const label = `${departmentName} · ${id}`;
+      await expect(department.locator(`option[value="${id}"]`)).toHaveText(
+        label,
+      );
+      await expect(
+        groups.getByText(`${label} · 核准結案 · 1 件`, { exact: true }),
+      ).toBeVisible();
+    }
+    await expect(
+      report.getByRole("heading", { name: panelName }),
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(filters.getByLabel("起日（臺灣時間）")).toBeFocused();
+    const status = filters.getByLabel("目前狀態");
+    await expect(status.locator("option")).toHaveText([
+      "全部狀態",
+      "主管待審",
+      "財務待審",
+      "核准結案",
+      "駁回結案",
+    ]);
+
+    // 用送審快照算出臺灣日曆日期，驗證三個篩選入口以及尚未套用時的下載限制。
+    const day = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "Asia/Taipei",
+    }).format(new Date(submitted.round.submittedAt));
+    await filters.getByLabel("起日（臺灣時間）").fill(day);
+    await filters.getByLabel("迄日（臺灣時間）").fill(day);
+    await department.selectOption(submitted.round.department.id);
+    await status.selectOption("approved");
+    await expect(exportCsv).toBeDisabled();
+    const appliedQuery = {
+      scope: "submitted",
+      startDate: day,
+      endDate: day,
+      departmentId: submitted.round.department.id,
+      status: "approved",
+    };
+    const [filteredRows, filteredGroups] = await Promise.all([
+      page.waitForResponse(
+        // 清單的篩選必須走一般請購 GET 的送審範圍。
+        (response) => new URL(response.url()).pathname === "/api/requisitions",
+      ),
+      page.waitForResponse(
+        // 另觀察群組查詢，避免只有一個入口接到篩選條件。
+        (response) =>
+          new URL(response.url()).pathname === "/api/requisitions/statistics",
+      ),
+      apply.click(),
+    ]);
+    // 兩個 GET 都必須實際攜帶同一組篩選參數。
+    for (const response of [filteredRows, filteredGroups]) {
+      expect(response.status()).toBe(200);
+      expect(Object.fromEntries(new URL(response.url()).searchParams)).toEqual(
+        appliedQuery,
+      );
+    }
+    await expect(rows.getByRole("listitem")).toHaveCount(1);
+    await expect(rowFor(rows, subject)).toContainText(submitted.number);
+    await expect(groups.getByRole("listitem")).toHaveCount(1);
+    await expect(groups).toContainText(departmentName);
+    await expect(groups).toContainText("核准結案");
+    await expect(groups).toContainText("1 件");
+    await expect(groups).toContainText("已核准的預估申請金額");
+    await expect(groups).toContainText("TWD 3.00");
+
+    // 由 Chromium 讀回真正下載的位元組，核對 BOM、欄位與唯一資料列。
+    const [download, csvResponse] = await Promise.all([
+      page.waitForEvent("download"),
+      page.waitForResponse(
+        // 核對實際下載 GET 與畫面已套用的篩選一致。
+        (response) =>
+          new URL(response.url()).pathname === "/api/requisitions/csv",
+      ),
+      exportCsv.click(),
+    ]);
+    expect(csvResponse.status()).toBe(200);
+    expect(Object.fromEntries(new URL(csvResponse.url()).searchParams)).toEqual(
+      appliedQuery,
+    );
+    expect(csvResponse.headers()["content-type"]).toBe(
+      "text/csv; charset=utf-8",
+    );
+    expect(download.suggestedFilename()).toBe("requisitions.csv");
+    const downloadPath = await download.path();
+    if (!downloadPath) throw new Error("瀏覽器未保存報表 CSV。");
+    const bytes = readFileSync(downloadPath);
+    expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0xef, 0xbb, 0xbf]));
+    expect(bytes.subarray(3).toString("utf8").split("\r\n")).toEqual([
+      "單號,主旨,申請人顯示名稱,送審部門,目前狀態,TWD 預估金額,最近送審時間",
+      expect.stringMatching(
+        new RegExp(
+          `^${submitted.number},"${subject}","${actorName("applicant")}","${departmentName}",核准結案,3\\.00,${day}T.+\\+08:00$`,
+        ),
+      ),
+      "",
+    ]);
+    // 瀏覽器開始下載後，等相同條件的清單及統計重新讀取完成再檢查版面。
+    await expect(exportCsv).toBeEnabled();
+    await checkLayout(page, report, subject, "ticket07-report");
+
+    // 驗證倒置日期與不符日期；清除後恢復可見資料，傳輸失敗時須移除舊結果並允許重讀。
+    const from = filters.getByLabel("起日（臺灣時間）");
+    const to = filters.getByLabel("迄日（臺灣時間）");
+    await from.fill("2099-01-01");
+    await apply.click();
+    await expect(report.getByRole("alert")).toContainText("起日不得晚於迄日");
+    await expect(exportCsv).toBeDisabled();
+    await to.fill("2099-01-01");
+    await apply.click();
+    await expect(report.getByText("沒有符合條件的請購。")).toBeVisible();
+    await expect(report.getByText("沒有符合條件的統計。")).toBeVisible();
+    await clear.click();
+    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await page.route(
+      "**/api/requisitions/statistics?*",
+      // 刻意中斷一次網路傳輸；重讀時由真實 API 回傳。
+      (route) => route.abort("failed"),
+      { times: 1 },
+    );
+    await apply.click();
+    await expect(report.getByRole("alert")).toContainText("無法讀取報表");
+    await expect(rows).toHaveCount(0);
+    await expect(groups).toHaveCount(0);
+    await expect(exportCsv).toBeDisabled();
+    await apply.click();
+    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await expect(exportCsv).toBeEnabled();
+
+    // 由同一瀏覽器另一分頁改用財務帳號；舊分頁權杖與新 Cookie 不配對。
+    const other = await context.newPage();
+    monitor(other);
+    await other.goto("/");
+    await other.getByRole("button", { name: "登出", exact: true }).click();
+    await login(other, "finance");
+    const unexpectedDownloads: string[] = [];
+    page.on("download", (file) => {
+      // 此時只記錄是否觸發下載，不讀取任何可能越權的檔案內容。
+      unexpectedDownloads.push(file.suggestedFilename());
+    });
+    const [blocked] = await Promise.all([
+      page.waitForResponse(
+        // 觀察下載按鈕送出的真實受保護 GET。
+        (response) =>
+          new URL(response.url()).pathname === "/api/requisitions/csv" &&
+          response.request().method() === "GET",
+      ),
+      exportCsv.click(),
+    ]);
+    expect(blocked.status()).toBe(400);
+    expect((await blocked.json()).code).toBe("invalid_csrf");
+    await expect(report).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "目前身分" })).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "請先確認登入狀態" }),
+    ).toBeFocused();
+    await page
+      .getByRole("button", { name: "重新確認身分", exact: true })
+      .click();
+    await expect(
+      page
+        .getByRole("region", { name: "目前身分" })
+        .getByText(actorName("finance"), { exact: true }),
+    ).toBeVisible();
+    await entry.click();
+    await expect(rowFor(rows, subject)).toContainText(submitted.number);
+    await expect(rowFor(rows, otherSubject)).toContainText(
+      otherSubmitted.number,
+    );
+    await expect(rowFor(rows, pendingSubject)).toHaveCount(0);
+    expect(unexpectedDownloads).toHaveLength(0);
+
+    // 管理帳號登入同一分頁後仍沒有業務報表入口或資料。
+    await page.getByRole("button", { name: "登出", exact: true }).click();
+    await login(page, "admin");
+    await expect(entry).toHaveCount(0);
+    await expect(report).toHaveCount(0);
+  } finally {
+    // 只關閉本案例的獨立 API 登入，不更動隔離環境的其他帳號或資料。
+    await Promise.all([
+      applicant.dispose(),
+      manager.dispose(),
+      finance.dispose(),
+    ]);
+  }
+});
+
+// 真實撤權不會撤銷啟用帳號的 Cookie；兩種報表操作都須移除已不可見的選項及資料。
+test("請購統計與 CSV 撤掉主管角色後重新套用與下載都移除舊部門", async ({
+  page,
+  playwright,
+  request: admin,
+}) => {
+  // 用本人正常送審，主管從業務畫面讀取，再由獨立管理工作階段調整資格。
+  const applicant = await playwright.request.newContext({ baseURL });
+  const subject = `報表即時撤權-${runId}`;
+  try {
+    await apiLogin(applicant, actorName("applicant"), finalPassword);
+    const submitted = await seedPending(applicant, subject);
+    if (!submitted.round) throw new Error("報表撤權測試缺少送審快照。");
+    const { id, name } = submitted.round.department;
+    await apiLogin(admin, "admin", demoAccounts.admin);
+    await login(page, "manager");
+    await page
+      .getByRole("button", { name: "請購統計與 CSV", exact: true })
+      .click();
+    const report = page.getByRole("region", { name: "請購統計與 CSV" });
+    const department = report.getByLabel("送審部門", { exact: true });
+    const status = report.getByLabel("目前狀態", { exact: true });
+    const option = department.locator(`option[value="${id}"]`);
+    const apply = report.getByRole("button", { name: "套用條件" });
+    const downloadCsv = report.getByRole("button", { name: "下載 CSV" });
+    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    const groups = report.getByRole("list", {
+      name: "依送審部門與目前狀態統計",
+    });
+    const empty = report.getByText("沒有符合條件的請購。");
+    const emptyGroups = report.getByText("沒有符合條件的統計。");
+    await expect(rowFor(rows, subject)).toContainText(submitted.number);
+    await expect(option).toContainText(name);
+    await department.selectOption(id);
+    await status.selectOption("manager_pending");
+    await apply.click();
+    await expect(downloadCsv).toBeEnabled();
+
+    try {
+      // 同一已登入主管用非空條件重讀；即使查詢成功，過期部門仍須連同資料移除。
+      await setFixtureManagerRole(admin, false);
+      await apply.click();
+      await expect(empty).toBeVisible();
+      await expect(emptyGroups).toBeVisible();
+      expect.soft(await option.count()).toBe(0);
+      expect
+        .soft(
+          await department
+            .locator("option")
+            .allTextContents()
+            .then(
+              // 連舊名稱都不可由選項看見。
+              (labels) => labels.join(" "),
+            ),
+        )
+        .not.toContain(name);
+      await expect(status).toHaveValue("manager_pending");
+      await expect(downloadCsv).toBeEnabled();
+
+      // 恢復後沿用既有非空條件讀取，讓下一次撤權從真的有結果開始。
+      await setFixtureManagerRole(admin, true);
+      await apply.click();
+      await expect(rowFor(rows, subject)).toContainText(submitted.number);
+      await expect(groups).toContainText("主管待審");
+      await expect(downloadCsv).toBeEnabled();
+      await setFixtureManagerRole(admin, false);
+      const [file, response] = await Promise.all([
+        page.waitForEvent("download"),
+        page.waitForResponse(
+          // 下載仍經真正受保護的 CSV 入口，並保留已套用的原部門識別。
+          (response) =>
+            new URL(response.url()).pathname === "/api/requisitions/csv",
+        ),
+        downloadCsv.click(),
+      ]);
+      expect(response.status()).toBe(200);
+      expect(new URL(response.url()).searchParams.get("departmentId")).toBe(id);
+      const path = await file.path();
+      if (!path) throw new Error("瀏覽器未保存撤權後的 CSV。");
+      expect(readFileSync(path).toString("utf8")).toBe(
+        "\uFEFF單號,主旨,申請人顯示名稱,送審部門,目前狀態,TWD 預估金額,最近送審時間\r\n",
+      );
+
+      // 下載開始後須重讀至穩定狀態，舊資料及識別都不能留在畫面。
+      await expect(apply).toBeEnabled();
+      await expect(report.getByRole("status")).toContainText("已開始下載 CSV");
+      expect.soft(await rows.count()).toBe(0);
+      expect.soft(await groups.count()).toBe(0);
+      expect.soft(await option.count()).toBe(0);
+      expect.soft(await empty.isVisible()).toBe(true);
+      expect.soft(await emptyGroups.isVisible()).toBe(true);
+      await expect(
+        page
+          .getByRole("region", { name: "目前身分" })
+          .getByText(actorName("manager"), { exact: true }),
+      ).toBeVisible();
+
+      // 改選全部部門後可以重新套用；恢復角色再查可重新取得合法選項。
+      await department.selectOption("");
+      await setFixtureManagerRole(admin, true);
+      await apply.click();
+      await expect(rowFor(rows, subject)).toContainText(submitted.number);
+      await expect(option).toContainText(name);
+
+      // 下載傳輸失敗時需先重讀報表；重新套用不會自動重送 CSV。
+      let csvRequests = 0;
+      page.on("request", (request) => {
+        // 只計算本輪兩次使用者操作發出的 CSV 請求。
+        if (new URL(request.url()).pathname === "/api/requisitions/csv")
+          csvRequests++;
+      });
+      await page.route(
+        "**/api/requisitions/csv?*",
+        // 模擬下載請求還未收到可用資料便失敗。
+        (route) => route.abort("failed"),
+        { times: 1 },
+      );
+      await downloadCsv.click();
+      await expect(report.getByRole("alert")).toHaveText(
+        "無法下載 CSV，請重新套用條件後再下載。",
+      );
+      await expect(rows).toHaveCount(0);
+      await expect(downloadCsv).toBeDisabled();
+      await apply.click();
+      await expect(downloadCsv).toBeEnabled();
+      expect(csvRequests).toBe(1);
+
+      // CSV 已開始下載而讀回失敗時，保留下載事實；重讀只會更新報表。
+      await page.route(
+        "**/api/requisitions/statistics?*",
+        // 只中斷下載之後的統計讀取，下載本身仍走真實 API。
+        (route) => route.abort("failed"),
+        { times: 1 },
+      );
+      await Promise.all([page.waitForEvent("download"), downloadCsv.click()]);
+      await expect(report.getByRole("alert")).toHaveText(
+        "已開始下載 CSV。 無法讀取報表，請重新套用條件。",
+      );
+      await expect(rows).toHaveCount(0);
+      await expect(downloadCsv).toBeDisabled();
+      await apply.click();
+      await expect(rowFor(rows, subject)).toContainText(submitted.number);
+      await expect(downloadCsv).toBeEnabled();
+      expect(csvRequests).toBe(2);
+    } finally {
+      // 後續簽核案例會沿用本輪的主管，務必還原其資格。
+      await setFixtureManagerRole(admin, true);
+    }
+  } finally {
+    // 只關閉本案例的獨立本人工作階段。
+    await applicant.dispose();
+  }
+});
+
+// 模擬先中斷清單傳輸，再讓統計的真實防偽拒絕抵達，驗證登入復原不被網路錯誤遮蔽。
+test("請購統計與 CSV 先發生網路錯誤仍處理較晚的防偽拒絕", async ({
+  page,
+  context,
+  playwright,
+}) => {
+  const applicant = await playwright.request.newContext({ baseURL });
+  const subject = `報表防偽錯誤順序-${runId}`;
+  try {
+    // 由本人建立一筆財務目前不可看的待審單，先在舊分頁取得報表。
+    await apiLogin(applicant, actorName("applicant"), finalPassword);
+    const submitted = await seedPending(applicant, subject);
+    await login(page, "applicant");
+    const entry = page.getByRole("button", {
+      name: "請購統計與 CSV",
+      exact: true,
+    });
+    await entry.click();
+    const report = page.getByRole("region", { name: "請購統計與 CSV" });
+    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    await expect(rowFor(rows, subject)).toContainText(submitted.number);
+
+    // 另一分頁實際更換共享 Cookie；第一分頁仍持有原身分的權杖。
+    const other = await context.newPage();
+    monitor(other);
+    await other.goto("/");
+    await other.getByRole("button", { name: "登出", exact: true }).click();
+    await login(other, "finance");
+
+    // 統計請求在 Chromium 已觀察到清單失敗後才放行，拒絕狀態由真實 API 產生。
+    const listFailed = page.waitForEvent("requestfailed", {
+      // 只等待本輪清單請求被中斷。
+      predicate: (request) =>
+        new URL(request.url()).pathname === "/api/requisitions",
+    });
+    await page.route(
+      "**/api/requisitions?*",
+      // 只中斷清單的瀏覽器傳輸。
+      (route) => route.abort("failed"),
+    );
+    await page.route(
+      "**/api/requisitions/statistics?*",
+      // 保留原請求及 Cookie，等清單失敗後才送給伺服器。
+      async (route) => {
+        await listFailed;
+        await route.continue();
+      },
+    );
+    const [blocked] = await Promise.all([
+      page.waitForResponse(
+        // 查詢失效必須由實際的統計端點回應。
+        (response) =>
+          new URL(response.url()).pathname === "/api/requisitions/statistics",
+      ),
+      report.getByRole("button", { name: "套用條件" }).click(),
+    ]);
+    // 兩個請求都已處理後才解除攔截，避免提前放行仍暫停的統計請求。
+    await page.unrouteAll({ behavior: "wait" });
+    expect(blocked.status()).toBe(400);
+    expect((await blocked.json()).code).toBe("invalid_csrf");
+
+    // 確認舊畫面與身分卸載，重驗後只能依目前財務資格取得資料。
+    await expect(report).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "目前身分" })).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "請先確認登入狀態" }),
+    ).toBeFocused();
+    await page
+      .getByRole("button", { name: "重新確認身分", exact: true })
+      .click();
+    await expect(
+      page
+        .getByRole("region", { name: "目前身分" })
+        .getByText(actorName("finance"), { exact: true }),
+    ).toBeVisible();
+    await entry.click();
+    await expect(
+      report.getByRole("button", { name: "下載 CSV" }),
+    ).toBeEnabled();
+    await expect(rowFor(rows, subject)).toHaveCount(0);
+  } finally {
+    // 結束獨立的資料準備工作階段。
+    await applicant.dispose();
+  }
+});
 
 // 驗證兩種結案與角色操作，也檢查瀏覽器保留管理 API 接受的原始部門名稱。
 test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照及駁回歷程", async ({
@@ -942,10 +1520,20 @@ test("回應中斷後保留原筆未知結果，同帳號恢復身分後可讀�
     await expect(unknown).toBeVisible();
     await expect(region.getByText("主管待審", { exact: true })).toBeVisible();
 
-    // 離開後另一筆可照常作決定；已成功提示與前一筆未知結果同時存在。
+    // 先經過草稿與統計面板再回簽核；報表讀取成功也不能清掉原筆未知結果。
     await page
       .getByRole("button", { name: "本人請購草稿", exact: true })
       .click();
+    await page
+      .getByRole("button", { name: "請購統計與 CSV", exact: true })
+      .click();
+    await expect(
+      page
+        .getByRole("region", { name: "請購統計與 CSV" })
+        .getByRole("button", { name: "下載 CSV", exact: true }),
+    ).toBeEnabled();
+
+    // 另一筆可照常作決定，已成功提示與前一筆未知結果須同時存在。
     await approvals(page);
     await openApproval(region, otherSubject);
     await region.getByRole("button", { name: "駁回", exact: true }).click();
