@@ -111,7 +111,12 @@ public sealed class RequisitionDraftTests
         Assert.Equal(0.62m, lines[1].GetProperty("estimatedAmount").GetDecimal());
         var list = await client.GetFromJsonAsync<JsonElement>(DraftsPath);
         Assert.Equal(new[] { originalId, otherId }, list.EnumerateArray().Select(row => row.GetProperty("id").GetGuid()));
-        Assert.Equal(new[] { "id", "number", "subject", "updatedAt" }, list[0].EnumerateObject().Select(property => property.Name).Order());
+        Assert.Equal(
+            new[] { "id", "number", "subject", "updatedAt" },
+            list[0]
+                .EnumerateObject()
+                .Select(property => property.Name)
+                .Order());
         Assert.Equal(opened.GetProperty("subject").GetString(), list[0].GetProperty("subject").GetString());
     }
 
@@ -344,7 +349,8 @@ public sealed class RequisitionDraftTests
         Assert.Contains(role, (await Harness.Me(other)).Roles);
         var own = await CreateDraft(other, new { subject = "另一帳號的草稿" });
         var list = await other.GetFromJsonAsync<JsonElement>(DraftsPath);
-        Assert.Equal(own.GetProperty("id").GetGuid(), Assert.Single(list.EnumerateArray()).GetProperty("id").GetGuid());
+        var listedDraft = Assert.Single(list.EnumerateArray());
+        Assert.Equal(own.GetProperty("id").GetGuid(), listedDraft.GetProperty("id").GetGuid());
 
         // 比對不存在與他人的請求回應，並透過擁有者確認所有異動都被拒絕。
         var existing = PathOf(original);
@@ -486,7 +492,8 @@ public sealed class RequisitionDraftTests
         var secondDraft = await CreateDraft(browser, new { subject = "第二個帳號的草稿" });
         Assert.Equal(second.UserId, secondDraft.GetProperty("applicantId").GetString());
         var list = await browser.GetFromJsonAsync<JsonElement>(DraftsPath);
-        Assert.Equal(secondDraft.GetProperty("id").GetGuid(), Assert.Single(list.EnumerateArray()).GetProperty("id").GetGuid());
+        var listedDraft = Assert.Single(list.EnumerateArray());
+        Assert.Equal(secondDraft.GetProperty("id").GetGuid(), listedDraft.GetProperty("id").GetGuid());
     }
 
     // 閒置期限或登出只撤銷該次登入，重新登入仍可讀回本人已保存的草稿。

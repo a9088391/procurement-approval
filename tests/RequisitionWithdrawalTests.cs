@@ -52,7 +52,8 @@ public sealed class RequisitionWithdrawalTests
         Assert.Equal("withdrawn", editable.GetProperty("status").GetString());
         Assert.Equal(VersionOf(withdrawn), VersionOf(editable));
         var drafts = await owner.GetFromJsonAsync<JsonElement>(DraftsPath);
-        Assert.Equal(draft.GetProperty("id").GetGuid(), Assert.Single(drafts.EnumerateArray()).GetProperty("id").GetGuid());
+        var listedDraft = Assert.Single(drafts.EnumerateArray());
+        Assert.Equal(draft.GetProperty("id").GetGuid(), listedDraft.GetProperty("id").GetGuid());
         await Expect(await Save(owner, submitted), HttpStatusCode.Conflict, "stale_version");
 
         // 保存新的內容，再從一般明細比較目前內容及完整的舊輪快照。
@@ -137,8 +138,18 @@ public sealed class RequisitionWithdrawalTests
         var savedDepartment = round.GetProperty("department");
         Assert.Equal(department.Id, savedDepartment.GetProperty("id").GetString());
         Assert.Equal(department.Name, savedDepartment.GetProperty("name").GetString());
-        Assert.Equal(manager.Id, round.GetProperty("manager").GetProperty("id").GetString());
-        Assert.Equal(finance.Id, round.GetProperty("finance").GetProperty("id").GetString());
+        Assert.Equal(
+            manager.Id,
+            round
+                .GetProperty("manager")
+                .GetProperty("id")
+                .GetString());
+        Assert.Equal(
+            finance.Id,
+            round
+                .GetProperty("finance")
+                .GetProperty("id")
+                .GetString());
         AssertSameFields(first, Assert.Single(second.GetProperty("previousRounds").EnumerateArray()),
             "round", "subject", "purpose", "lines", "estimatedAmount");
         var history = second.GetProperty("history");

@@ -12,6 +12,8 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // 新增送審輪次快照與簽核事件，保留部門及簽核人關聯，並限制每輪各階段事件唯一。
+            // 舊草稿不會在此 migration 中改寫。
             migrationBuilder.CreateTable(
                 name: "RequisitionRounds",
                 columns: table => new
@@ -117,6 +119,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // 降版會刪除輪次快照及簽核歷程，已送審請購不會因此還原為草稿。
             migrationBuilder.DropTable(
                 name: "RequisitionApprovalEvents");
 

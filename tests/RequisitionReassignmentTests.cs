@@ -128,8 +128,19 @@ public sealed class RequisitionReassignmentTests
         // 重送採目前部門與預設人選；原主管僅能看到新輪，本人仍能讀回完整舊歷程。
         await scenario.Update(scenario.Owner, edit => edit with { DepartmentId = scenario.OtherDepartment.Id });
         var resubmitted = await Act(owner, withdrawn, "submit");
-        Assert.Equal(2, resubmitted.GetProperty("round").GetProperty("number").GetInt32());
-        Assert.Equal(scenario.OtherDepartment.Id, resubmitted.GetProperty("round").GetProperty("department").GetProperty("id").GetString());
+        Assert.Equal(
+            2,
+            resubmitted
+                .GetProperty("round")
+                .GetProperty("number")
+                .GetInt32());
+        Assert.Equal(
+            scenario.OtherDepartment.Id,
+            resubmitted
+                .GetProperty("round")
+                .GetProperty("department")
+                .GetProperty("id")
+                .GetString());
         AssertPerson(resubmitted.GetProperty("round").GetProperty("manager"), scenario.Manager);
         Assert.True(JsonElement.DeepEquals(previous, Assert.Single(resubmitted.GetProperty("previousRounds").EnumerateArray())));
         Assert.Equal(5, resubmitted.GetProperty("history").GetArrayLength());
@@ -316,7 +327,12 @@ public sealed class RequisitionReassignmentTests
 
     // 封閉 DTO 的實際 JSON 欄位，欄位順序不屬於契約。
     private static void AssertKeys(JsonElement entry, params string[] expected) =>
-        Assert.Equal(expected.Order(), entry.EnumerateObject().Select(property => property.Name).Order());
+        Assert.Equal(
+            expected.Order(),
+            entry
+                .EnumerateObject()
+                .Select(property => property.Name)
+                .Order());
 
     // 人員在管理與歷程皆只包含相同的穩定識別與名稱。
     internal static void AssertPerson(JsonElement person, RequisitionApprovalScenario.Business expected)

@@ -6,10 +6,8 @@ import {
   writeOrganization,
   type OrganizationDto,
 } from "./api";
-import {
-  OrganizationForms,
-  type SubmitOrganization,
-} from "./OrganizationForms";
+import type { SubmitOrganization } from "./OrganizationForms";
+import { OrganizationLists } from "./OrganizationLists";
 
 interface Props {
   getToken: () => string;
@@ -156,6 +154,7 @@ export function Organization({
     event,
     buildWrite,
     confirmation,
+    onConfirmed,
   ) => {
     // 在表單還可讀取時取出必要欄位，並立即清除畫面上的臨時密碼。
     event.preventDefault();
@@ -175,8 +174,9 @@ export function Organization({
       if (password) values.delete(password.name);
       await write;
 
-      // 204 已確認保存；等讀回成功才重建表單，期間不允許重複送出。
+      // 204 已確認保存，新建與編輯回到清單；讀回前仍鎖住舊資料的寫入。
       onConfirmedWriteChange(confirmation);
+      onConfirmed?.();
       await loadSettings(confirmation);
     } catch (error) {
       // 身分或權杖不可用時立刻移除設定，防止舊資料在恢復期間可見。
@@ -213,7 +213,7 @@ export function Organization({
     }
   };
 
-  // 成功讀取才顯示表單；恢復期間停用寫入但保留可供比對的快照。
+  // 成功讀取才顯示清單；恢復期間停用寫入但保留可供比對的快照。
   return (
     <div
       className="organization"
@@ -251,10 +251,17 @@ export function Organization({
       </button>
       <p className="hint">讀取設定成功後，表單會以最新保存值重建。</p>
       {readback ? (
-        <OrganizationForms
+        <OrganizationLists
           snapshot={readback.snapshot}
           revision={readback.revision}
           disabled={pending || requiresRead}
+          pending={pending}
+          onNavigate={
+            // 主動換頁時清掉上一頁的訊息；待重讀錯誤及未決提示仍保留。
+            () => {
+              if (!requiresRead) setNotice(null);
+            }
+          }
           onSubmit={submit}
         />
       ) : null}

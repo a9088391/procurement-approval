@@ -72,7 +72,10 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
         output.WriteLine($"persistence durable_writes={persistence.Durable.Count} matched_writes={persistence.Successful.Count} mismatches={persistence.Errors.Count}");
         foreach (var error in persistence.Errors.Take(8))
             output.WriteLine(error);
-        Assert.True(warmPassed && measuredPassed && persistence.Errors.Count == 0,
+        Assert.True(
+            warmPassed
+                && measuredPassed
+                && persistence.Errors.Count == 0,
             "請求量、正式送出速率、成功寫入、持久化或各操作延遲未通過，請查閱量測輸出。");
     }
 
@@ -140,7 +143,12 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
             Assert.Equal(expected.Count, groups.GetArrayLength());
             foreach (var group in groups.EnumerateArray())
             {
-                Assert.Equal(applicant.Department.Id, group.GetProperty("department").GetProperty("id").GetString());
+                Assert.Equal(
+                    applicant.Department.Id,
+                    group
+                        .GetProperty("department")
+                        .GetProperty("id")
+                        .GetString());
                 Assert.True(expected.Remove(group.GetProperty("status").GetString() ?? "", out var count));
                 Assert.Equal(count, group.GetProperty("count").GetInt32());
                 Assert.Equal(count * OriginalAmount, group.GetProperty("estimatedAmount").GetDecimal());
@@ -197,7 +205,12 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
         // 校驗批次和案件一對一，避免重複操作在正式量測期間製造人為衝突。
         var plannedWrites = plan.Where(request => request.IsWrite).ToArray();
         Assert.Equal(writeRows.Values.Sum(rows => rows.Length), plannedWrites.Length);
-        Assert.Equal(plannedWrites.Length, plannedWrites.Select(request => request.Row?.Id).Distinct().Count());
+        Assert.Equal(
+            plannedWrites.Length,
+            plannedWrites
+                .Select(request => request.Row?.Id)
+                .Distinct()
+                .Count());
         Assert.All(plannedWrites, request => Assert.NotNull(request.Row));
         return plan;
     }
@@ -361,14 +374,15 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
         var belowRate = seconds.Count(count => count < Rate);
         var aboveRate = seconds.Count(count => count > Rate);
         var formal = phase.Seconds == MeasuredSeconds;
-        var ratePassed = belowRate == 0 && aboveRate == 0 && lateSlots == 0;
+        var ratePassed = belowRate == 0
+            && aboveRate == 0
+            && lateSlots == 0;
         var rateResult = formal ? (ratePassed ? "pass" : "fail") : "observed_only";
         output.WriteLine(FormattableString.Invariant(
             $"phase={name} window_s={phase.Seconds} starts_per_second_min={seconds.Min()} max={seconds.Max()} seconds_below_rate={belowRate} seconds_above_rate={aboveRate} max_dispatch_lag_ms={lag:F3} lag_limit_ms={SlotMs:F3} slots_above_lag_limit={lateSlots} rate_fidelity={rateResult} tail_ms={tail:F2}"));
 
         // 即使速率失敗也輸出逐操作結果；預熱須送足及成功，延遲門檻只套用正式量測。
         var passed = !formal || ratePassed;
-        var thresholds = new[] { (4500, 500), (1800, 500), (900, 1000), (900, 1000), (450, 1000), (450, 1000) };
         foreach (var operation in Enum.GetValues<Operation>())
         {
             // 完整回應才有延遲；只有 HTTP 合約與持久化都對應的寫入才計入成功寫入。
@@ -397,7 +411,17 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
                 .Order()
                 .ToArray();
             var p95 = samples.Length == 0 ? double.PositiveInfinity : samples[(int)Math.Ceiling(samples.Length * 0.95) - 1];
-            var (measuredCount, limit) = thresholds[(int)operation];
+            // 依操作名稱指定正式量測總筆數及 p95 毫秒上限，避免 enum 順序變更套錯門檻。
+            var (measuredCount, p95LimitMs) = operation switch
+            {
+                Operation.List => (4500, 500),
+                Operation.Detail => (1800, 500),
+                Operation.Statistics => (900, 1000),
+                Operation.Save => (900, 1000),
+                Operation.Submit => (450, 1000),
+                Operation.Approve => (450, 1000),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null)
+            };
             var expected = measuredCount * phase.Seconds / MeasuredSeconds;
             var conflicts = items.Count(item => item.Outcome == "conflict");
             var rejected = items.Count(item => item.Outcome is "conflict" or "rejection");
@@ -405,13 +429,13 @@ public sealed partial class RequisitionBenchmarkTests(ITestOutputHelper output)
             var transportErrors = items.Count(item => item.Outcome == "transport_error");
             var contractErrors = items.Count(item => item.Outcome == "contract_error");
             output.WriteLine(FormattableString.Invariant(
-                $"phase={name} op={operation} planned={items.Length} sent={sent} completed={complete} ok={ok} durable={durableLabel} successful_writes={writesLabel} rejected={rejected} conflicts={conflicts} server_errors={serverErrors} transport_errors={transportErrors} contract_errors={contractErrors} errors={serverErrors + transportErrors + contractErrors} p95_ms={p95:F2} limit_ms={limit}"));
+                $"phase={name} op={operation} planned={items.Length} sent={sent} completed={complete} ok={ok} durable={durableLabel} successful_writes={writesLabel} rejected={rejected} conflicts={conflicts} server_errors={serverErrors} transport_errors={transportErrors} contract_errors={contractErrors} errors={serverErrors + transportErrors + contractErrors} p95_ms={p95:F2} limit_ms={p95LimitMs}"));
             passed &= items.Length == expected
                 && sent == expected
                 && complete == expected
                 && ok == expected
                 && (!isWrite || writes == expected)
-                && (!formal || p95 <= limit);
+                && (!formal || p95 <= p95LimitMs);
         }
 
         // 抽樣輸出分類及狀態碼，避免回應或連線內容進入公開紀錄。

@@ -10,6 +10,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // 撤回與送審共用 NULL 階段，改以 Kind 唯一索引限制各輪各一筆，簽核階段仍各限一筆。
             migrationBuilder.DropIndex(
                 name: "IX_RequisitionApprovalEvents_RequisitionId_RoundNumber_Stage",
                 table: "RequisitionApprovalEvents");
@@ -40,6 +41,8 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // 同一輪已有 submitted 與 withdrawn 時，舊版 NULLS NOT DISTINCT 索引會阻止重建。
+            // 若仍有 withdrawn 事件，舊 KindStage 約束也會使本 migration 降版失敗並回滾。
             migrationBuilder.DropIndex(
                 name: "IX_RequisitionApprovalEvents_RequisitionId_RoundNumber_Kind",
                 table: "RequisitionApprovalEvents");

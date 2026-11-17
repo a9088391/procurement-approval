@@ -11,6 +11,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // 建立請購草稿與明細，申請人受外鍵保護，金額欄位以兩位小數保存。
             migrationBuilder.CreateTable(
                 name: "Requisitions",
                 columns: table => new
@@ -75,6 +76,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // 降版會移除請購與明細資料，已保存的草稿需由備份復原。
             migrationBuilder.DropTable(
                 name: "RequisitionLines");
 

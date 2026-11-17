@@ -26,12 +26,20 @@ internal sealed record RequisitionReportFilter(bool SubmittedOnly, DateTimeOffse
             || !ReadSingle(query, "endDate", out var endValue)
             || !ReadSingle(query, "departmentId", out var department)
             || !ReadSingle(query, "status", out var status)
-            || scope is not (null or "submitted")
+            || scope is not (
+                null
+                or "submitted")
             || !ReadDate(startValue, out var start)
             || !ReadDate(endValue, out var end)
             || (department is not null
-                && (department.Length != 32 || !Guid.TryParseExact(department, "N", out _)))
-            || status is not (null or Requisition.ManagerPending or Requisition.FinancePending or Requisition.Approved or Requisition.Rejected))
+                && (department.Length != 32
+                    || !Guid.TryParseExact(department, "N", out _)))
+            || status is not (
+                null
+                or Requisition.ManagerPending
+                or Requisition.FinancePending
+                or Requisition.Approved
+                or Requisition.Rejected))
             return null;
 
         // 排除無法表示的 UTC 起點或翌日終點；迄日以翌日零時切分，不依賴資料庫小數秒精度。

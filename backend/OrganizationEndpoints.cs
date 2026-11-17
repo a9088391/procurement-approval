@@ -23,6 +23,11 @@ internal static class OrganizationEndpoints
             string id, UpdateDepartmentRequest request, HttpContext http, OrganizationService organization, CancellationToken ct) =>
             organization.UpdateDepartment(id, request, http.User, ct));
 
+        // 單筆與批次停用共用同一入口，讓兩者適用相同的版本及交易檢查。
+        admin.MapPost("/departments/deactivate", (
+            DeactivateOrganizationRequest? request, HttpContext http, OrganizationService organization, CancellationToken ct) =>
+            organization.DeactivateDepartments(request, http.User, ct));
+
         // HTTP 只開放新增業務帳號，避免從管理畫面新增管理員。
         admin.MapPost("/accounts", (
             CreateBusinessAccountRequest request, HttpContext http, OrganizationService organization, CancellationToken ct) =>
@@ -32,6 +37,11 @@ internal static class OrganizationEndpoints
         admin.MapPost("/accounts/{id}", (
             string id, UpdateBusinessAccountRequest request, HttpContext http, OrganizationService organization, CancellationToken ct) =>
             organization.UpdateAccount(id, request, http.User, ct));
+
+        // 帳號停用獨立接受目標版本，管理員可在保留原設定的情況下撤銷登入。
+        admin.MapPost("/accounts/deactivate", (
+            DeactivateOrganizationRequest? request, HttpContext http, OrganizationService organization, CancellationToken ct) =>
+            organization.DeactivateAccounts(request, http.User, ct));
 
         // 密碼重設使用獨立請求欄位，避免一般設定表單能變更憑證。
         admin.MapPost("/accounts/{id}/reset-password", (

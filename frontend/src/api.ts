@@ -54,6 +54,11 @@ export interface OrganizationDto {
   accounts: BusinessAccountDto[];
 }
 
+// 單筆與批次停用都只提交目標識別及讀取時的版本。
+interface DeactivateOrganizationRequest {
+  items: { id: string; version: string }[];
+}
+
 // 各路徑攜帶明確的寫入欄位，不把讀取資料或密碼帶到其他操作。
 export type OrganizationWrite =
   | { path: "departments"; body: { name: string } }
@@ -72,6 +77,10 @@ export type OrganizationWrite =
       };
     }
   | { path: `accounts/${string}`; body: AccountSettingsDto }
+  | {
+      path: "departments/deactivate" | "accounts/deactivate";
+      body: DeactivateOrganizationRequest;
+    }
   | {
       path: `accounts/${string}/reset-password`;
       body: Pick<PasswordRequestDto, "newPassword" | "version">;
@@ -195,7 +204,8 @@ type SubmittedRequisitionDto = RequisitionSummaryDto & {
   round: NonNullable<RequisitionSummaryDto["round"]>;
 };
 
-// 明細另含已保存內容及歷程；送審後的內容、人選和部門取自該輪快照。
+// 草稿與撤回修改中的明細使用目前保存的內容，送審案件使用最新一輪保存的內容與部門。
+// round 的人選反映目前有效指派，previousRounds 保留送審時的原始指派。改派前後人選由歷程呈現。
 export interface RequisitionDetailDto extends RequisitionSummaryDto {
   purpose: string | null;
   lines: DraftDto["lines"];

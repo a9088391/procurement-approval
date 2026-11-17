@@ -76,13 +76,19 @@ HTTP 輸入使用明確 DTO。帳號資格、密碼及登入異動在同一交�
 | `GET /api/admin/organization` | 無 | `200`，回傳 `departments` 及 `accounts` |
 | `POST /api/admin/departments` | `name` | `204` |
 | `POST /api/admin/departments/{id}` | `name`、`active`、`version` | `204` |
+| `POST /api/admin/departments/deactivate` | `{"items":[{"id":"部門識別","version":"讀取時的版本"}]}`，可傳一筆或多筆 | `204` |
 | `POST /api/admin/accounts` | `userName`、`password`、`departmentId`、`isManager`、`isFinance` | `204` |
 | `POST /api/admin/accounts/{id}` | `version`、`active`、`departmentId`、`isManager`、`isFinance`、`managerReviewerId`、`financeReviewerId` | `204` |
+| `POST /api/admin/accounts/deactivate` | `{"items":[{"id":"業務帳號識別","version":"讀取時的版本"}]}`，可傳一筆或多筆 | `204` |
 | `POST /api/admin/accounts/{id}/reset-password` | `version`、`newPassword` | `204` |
 
 部門資料包含 `id`、`name`、`active`、`version`。帳號資料包含 `id`、`userName`、`mustChangePassword` 及帳號保存所需欄位。管理端點不回傳密碼、雜湊或登入識別。布林欄位要明確提供；更新時可用 `null` 保留舊帳號原本未分配部門的狀態，或清除預設人選。送出較舊版本會得到 `409 stale_version`，請重新讀取設定再決定如何修改。
 
 部門名稱修剪首尾空白後須為 1–100 個 UTF-16 字元。新帳號名稱同樣修剪首尾空白，須為 1–64 個 UTF-16 字元，重複名稱以不分大小寫判斷。部門名稱、新帳號名稱、臨時密碼及強制改密碼的新密碼都必須能由單行表單輸入，任何位置含 CR 或 LF 均回 `400 invalid_input`。密碼長度 12–128 個 UTF-16 字元，首尾空白會保留。新業務帳號具申請人角色，主管與財務可兼任。重設時需使用不同於現有密碼的臨時密碼。新分配部門須為啟用狀態，原有歸屬可保留。新選的預設審核人須啟用、有對應角色，且申請人和兩位審核人各自不同。停用或撤權保留指向該人選的設定，管理員可查閱並替換。
+
+停用請求只接受 `items` 與每筆 `id`、`version`。缺少本文、清單為空、重複識別、無效值或未宣告欄位回 `400 invalid_input`。任一目標不存在，或帳號端點收到非業務帳號識別，回 `404 not_found`。所有目標都存在但任一版本已過期時，回 `409 stale_version`。這些錯誤均保留整批資料及登入狀態。請用 `GET /api/admin/organization` 取得各筆目前版本。
+
+停用會更新啟用中目標的狀態及版本；已停用且版本相符的目標保留原版本。部門名稱、帳號角色、歸屬、預設審核人及既有請購紀錄保留。業務帳號的所有既有登入在同一交易撤銷，停用期間的登入嘗試回 `401 invalid_credentials`。可透過原有的編輯端點設定 `active: true` 來重新啟用；重新啟用的使用者須重新登入。
 
 ## 本人可編輯請購 API
 

@@ -181,9 +181,12 @@ async function layout(page: Page, name: string) {
     for (const input of await inputs.all()) {
       await expect(input).toBeVisible();
       const box = await input.boundingBox();
+      // 原生勾選框只需有可見寬度；文字與密碼欄位保留原本的輸入空間。
+      const minimumWidth =
+        (await input.getAttribute("type")) === "checkbox" ? 0 : 150;
       expect(
         box !== null &&
-          box.width > 150 &&
+          box.width > minimumWidth &&
           box.x >= 0 &&
           box.x + box.width <= width,
       ).toBe(true);
@@ -298,6 +301,11 @@ test("錯誤登入可修正後成功，Cookie 不可供 JavaScript 讀取", asyn
   ).toBe(0);
 });
 
+// 一般登入從頁首展開表單；臨時密碼的強制變更由組織測試驗證。
+async function openPasswordPanel(page: Page) {
+  await page.getByRole("button", { name: "變更密碼表單", exact: true }).click();
+}
+
 // 以兩個獨立登入驗證改密碼修正與撤銷，避免只從當前頁面推論其他登入失效。
 test("錯誤目前密碼修正、成功回登入、全部舊登入撤銷及新密碼登入", async ({
   page,
@@ -316,6 +324,8 @@ test("錯誤目前密碼修正、成功回登入、全部舊登入撤銷及新�
     );
     await login(page, "manager");
     await expect(page.getByRole("heading", { name: "目前身分" })).toBeVisible();
+
+    await openPasswordPanel(page);
 
     // 先送錯誤的目前密碼，確認拒絕後可只更正這一欄。
     await secret(
@@ -370,14 +380,28 @@ test("錯誤目前密碼修正、成功回登入、全部舊登入撤銷及新�
 });
 
 // 直接撤銷頁面使用的登入，藉手動重讀確認舊身分與敏感欄位不再顯示。
-test("真實登入撤銷後重新確認回登入並清除敏感表單", async ({ page }) => {
-  // 在登入後填入未提交的新密碼，讓案例能觀察敏感表單是否被卸載。
+test("改密碼表單可用鍵盤收合清空，真實撤銷登入後卸載表單", async ({ page }) => {
+  // 用鍵盤展開並收合改密碼表單，核對控制項焦點和敏感欄位卸載。
   await login(page, "finance");
-  await expect(page.getByRole("heading", { name: "目前身分" })).toBeVisible();
-  await secret(
-    page.getByLabel("新密碼", { exact: true }),
-    randomBytes(24).toString("hex"),
-  );
+  const toggle = page.getByRole("button", {
+    name: "變更密碼表單",
+    exact: true,
+  });
+  const newPassword = page.getByLabel("新密碼", { exact: true });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(newPassword).toHaveCount(0);
+  await toggle.press("Space");
+  await expect(toggle).toBeFocused();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await secret(newPassword, randomBytes(24).toString("hex"));
+  await toggle.press("Space");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(newPassword).toHaveCount(0);
+  await toggle.press("Space");
+  await expect(newPassword).toHaveValue("");
+
+  // 保留未送出的表單至身分重讀，確認撤銷時也會卸載。
+  await secret(newPassword, randomBytes(24).toString("hex"));
   // 共用頁面 Cookie 的 API 請求先撤銷登入，再由 UI 重讀確認表單清除。
   const response = await page.request.post("/api/auth/logout", {
     headers: { "X-CSRF-TOKEN": await csrf(page.request) },
@@ -426,6 +450,7 @@ test("mocked CSRF 失效只手動恢復並重試，不自動重送", async ({ pa
   await page.getByRole("button", { name: "重新確認身分" }).click();
   await expect(page.getByRole("heading", { name: "目前身分" })).toBeVisible();
   expect(posts).toBe(1);
+  await openPasswordPanel(page);
   await expect(page.getByLabel("目前密碼", { exact: true })).toHaveValue("");
 
   // 由使用者再次按登出，確認第二次 POST 才完成操作。
@@ -461,6 +486,8 @@ test("mocked 401 回登入、重新登入另一帳號不保留前帳號內容", 
     },
   );
 
+  await openPasswordPanel(page);
+
   // 填寫並提交改密碼，確認拒絕後直接回到登入且只有一次改密碼請求。
   await secret(
     page.getByLabel("目前密碼", { exact: true }),
@@ -480,6 +507,7 @@ test("mocked 401 回登入、重新登入另一帳號不保留前帳號內容", 
   // 改以財務登入，檢查只顯示新帳號、空白表單與當前提示狀態。
   await login(page, "finance");
   await expect(page.locator("dd").first()).toHaveText("finance");
+  await openPasswordPanel(page);
   await expect(page.getByLabel("新密碼", { exact: true })).toHaveValue("");
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
@@ -552,6 +580,8 @@ test("模擬改密碼已提交但回應遺失，保留未知提示並用新密�
         await route.abort("failed");
       },
     );
+
+    await openPasswordPanel(page);
 
     // 從 UI 送出操作後確認未知提示與使用新密碼的指引。
     await secret(

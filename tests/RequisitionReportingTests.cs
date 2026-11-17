@@ -349,7 +349,13 @@ public sealed class RequisitionReportingTests
         var listQuery = query == "" ? "?scope=submitted" : query;
         var result = await client.GetFromJsonAsync<JsonElement>(RequisitionsPath + listQuery);
         var list = result.EnumerateArray().ToArray();
-        Assert.Equal(expected.Select(row => ApprovalPath(row.Saved)).Order(), list.Select(ApprovalPath).Order());
+        Assert.Equal(
+            expected
+                .Select(row => ApprovalPath(row.Saved))
+                .Order(),
+            list
+                .Select(ApprovalPath)
+                .Order());
         foreach (var item in expected)
         {
             // 從同一份已完成的 HTTP 回應找回本案例預期的唯一一張單。

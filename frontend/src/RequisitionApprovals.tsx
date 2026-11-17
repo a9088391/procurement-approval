@@ -39,6 +39,8 @@ export const statusNames = {
   rejected: "駁回結案",
 };
 
+const emptyFilters = { query: "", status: "" };
+
 const actionNames = {
   submit: "送出簽核",
   withdraw: "撤回修改",
@@ -81,18 +83,28 @@ function RequisitionRoundFields({
 }) {
   return (
     <>
-      <dt>送審輪次</dt>
-      <dd>第 {round.number} 輪</dd>
-      <dt>送審部門</dt>
-      <dd>{round.department.name}</dd>
-      <dt>送審時間</dt>
-      <dd>
-        <RequisitionTime value={round.submittedAt} />
-      </dd>
-      <dt>主管審核者</dt>
-      <dd>{round.manager.userName}</dd>
-      <dt>財務審核者</dt>
-      <dd>{round.finance.userName}</dd>
+      <div>
+        <dt>送審部門</dt>
+        <dd>{round.department.name}</dd>
+      </div>
+      <div>
+        <dt>送審輪次</dt>
+        <dd>第 {round.number} 輪</dd>
+      </div>
+      <div>
+        <dt>送審時間</dt>
+        <dd>
+          <RequisitionTime value={round.submittedAt} />
+        </dd>
+      </div>
+      <div>
+        <dt>主管審核者</dt>
+        <dd>{round.manager.userName}</dd>
+      </div>
+      <div>
+        <dt>財務審核者</dt>
+        <dd>{round.finance.userName}</dd>
+      </div>
     </>
   );
 }
@@ -101,29 +113,49 @@ function RequisitionRoundFields({
 function RequisitionLines({ lines }: { lines: RequisitionDetailDto["lines"] }) {
   return (
     <>
-      <h4>請購明細</h4>
       {lines.length ? (
-        <ol>
-          {lines.map(
-            // 明細保留 API 的順序，以索引識別同一份已讀取快照中的位置。
-            (line, index) => (
-              <li key={index} className="draft-line">
-                <dl>
-                  <dt>品名</dt>
-                  <dd>{line.itemName || "未填品名"}</dd>
-                  <dt>單位</dt>
-                  <dd>{line.unit || "未填單位"}</dd>
-                  <dt>數量</dt>
-                  <dd>{line.quantity ?? "未填數量"}</dd>
-                  <dt>預估單價</dt>
-                  <dd>{formatDraftAmount(line.unitPrice)}</dd>
-                  <dt>預估小計</dt>
-                  <dd>{formatDraftAmount(line.estimatedAmount)}</dd>
-                </dl>
-              </li>
-            ),
-          )}
-        </ol>
+        <div
+          className="table-frame"
+          role="region"
+          aria-label="請購品項"
+          tabIndex={0}
+        >
+          <table className="line-table">
+            <thead>
+              <tr>
+                <th scope="col">品名</th>
+                <th scope="col">單位</th>
+                <th scope="col" className="quantity">
+                  數量
+                </th>
+                <th scope="col" className="money">
+                  預估單價
+                </th>
+                <th scope="col" className="money">
+                  預估小計
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map(
+                // 明細保留 API 的順序，以索引識別同一份已讀取快照中的位置。
+                (line, index) => (
+                  <tr key={index}>
+                    <td>{line.itemName || "未填品名"}</td>
+                    <td>{line.unit || "未填單位"}</td>
+                    <td className="quantity">{line.quantity ?? "未填數量"}</td>
+                    <td className="money">
+                      {formatDraftAmount(line.unitPrice)}
+                    </td>
+                    <td className="money">
+                      {formatDraftAmount(line.estimatedAmount)}
+                    </td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="hint">目前沒有明細。</p>
       )}
@@ -142,17 +174,24 @@ function RequisitionRoundSnapshot({
   // 部門文字採 API 原值呈現，保留歷史快照中合法的特殊字元。
   return (
     <>
-      <dl>
-        <dt>主旨</dt>
-        <dd>{snapshot.subject || "未填主旨"}</dd>
-        <dt>整單用途</dt>
-        <dd className="requisition-purpose">
-          {snapshot.purpose || "未填用途"}
-        </dd>
+      <dl className="document-fields">
+        <div>
+          <dt>主旨</dt>
+          <dd>{snapshot.subject || "未填主旨"}</dd>
+        </div>
+        <div>
+          <dt>整單用途</dt>
+          <dd className="requisition-purpose">
+            {snapshot.purpose || "未填用途"}
+          </dd>
+        </div>
         <RequisitionRoundFields round={round} />
-        <dt>預估申請金額</dt>
-        <dd>{formatDraftAmount(snapshot.estimatedAmount)}</dd>
+        <div>
+          <dt>預估申請金額</dt>
+          <dd>{formatDraftAmount(snapshot.estimatedAmount)}</dd>
+        </div>
       </dl>
+      <h5>請購明細</h5>
       <RequisitionLines lines={snapshot.lines} />
     </>
   );
@@ -161,25 +200,12 @@ function RequisitionRoundSnapshot({
 // 純顯示 API 已授權的目前內容與輪次，不從設定重建資格或歷史資料。
 function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
   const { round, history } = detail;
+  // 只有內容還可編輯時，才需要顯示送審受阻的說明。
+  const editable = detail.status === "draft" || detail.status === "withdrawn";
 
   // 撤回期間的頂層內容已可編輯，歷史送審版本改由獨立區塊呈現。
   return (
     <>
-      <dl>
-        <dt>主旨</dt>
-        <dd>{detail.subject || "未填主旨"}</dd>
-        <dt>整單用途</dt>
-        <dd className="requisition-purpose">{detail.purpose || "未填用途"}</dd>
-        <dt>申請人</dt>
-        <dd>{detail.applicant.userName}</dd>
-        <dt>目前狀態</dt>
-        <dd>{statusNames[detail.status]}</dd>
-        <dt>預估申請金額</dt>
-        <dd>{formatDraftAmount(detail.estimatedAmount)}</dd>
-        {round && detail.status !== "withdrawn" ? (
-          <RequisitionRoundFields round={round} />
-        ) : null}
-      </dl>
       {detail.status === "withdrawn" ? (
         <p className="hint">
           請至「本人請購草稿」開啟單號 {detail.number}{" "}
@@ -191,69 +217,99 @@ function RequisitionContent({ detail }: { detail: RequisitionDetailDto }) {
           簽核已暫停，保留目前關卡。請聯絡管理員確認尚未完成關卡的審核人資格。
         </p>
       ) : null}
-      {(detail.status === "draft" || detail.status === "withdrawn") &&
-      !detail.canSubmit ? (
+      {editable && !detail.canSubmit ? (
         <p className="hint">
           {detail.isComplete
             ? "目前無法送審。請管理員確認申請人的部門及預設審核人設定。"
             : "請先在本人請購草稿填妥主旨、用途與 1–100 筆有效明細並保存。"}
         </p>
       ) : null}
-      {detail.status === "withdrawn" ? <h4>目前可編輯內容</h4> : null}
-      <RequisitionLines lines={detail.lines} />
-      {detail.previousRounds.length ? (
-        <>
-          <h4>先前送審輪次</h4>
-          {detail.previousRounds.map(
-            // 舊輪次只依伺服器回傳的可見範圍呈現，並保留瀏覽器原生展開操作。
-            (snapshot) => (
-              <details key={snapshot.round.number}>
-                <summary>第 {snapshot.round.number} 輪送審快照</summary>
-                <RequisitionRoundSnapshot snapshot={snapshot} />
-              </details>
-            ),
+      <div className="detail-grid">
+        <div>
+          <h3>
+            {detail.status === "withdrawn" ? "目前可編輯內容" : "請購資料"}
+          </h3>
+          <dl className="document-fields">
+            <div>
+              <dt>申請人</dt>
+              <dd>{detail.applicant.userName}</dd>
+            </div>
+            {round && detail.status !== "withdrawn" ? (
+              <RequisitionRoundFields round={round} />
+            ) : null}
+            <div>
+              <dt>整單用途</dt>
+              <dd className="requisition-purpose">
+                {detail.purpose || "未填用途"}
+              </dd>
+            </div>
+          </dl>
+          <h3>請購明細</h3>
+          <RequisitionLines lines={detail.lines} />
+          <dl className="document-total">
+            <dt>預估申請金額</dt>
+            <dd>{formatDraftAmount(detail.estimatedAmount)}</dd>
+          </dl>
+          {detail.previousRounds.length ? (
+            <>
+              <h3>先前送審輪次</h3>
+              {detail.previousRounds.map(
+                // 舊輪次只依伺服器回傳的可見範圍呈現，並保留瀏覽器原生展開操作。
+                (snapshot) => (
+                  <details key={snapshot.round.number}>
+                    <summary>第 {snapshot.round.number} 輪送審快照</summary>
+                    <RequisitionRoundSnapshot snapshot={snapshot} />
+                  </details>
+                ),
+              )}
+            </>
+          ) : null}
+        </div>
+        <div className="detail-history">
+          <h3>操作歷程</h3>
+          {history.length ? (
+            <ol className="timeline" aria-label="操作歷程" role="list">
+              {history.map(
+                // 同輪同關可多次改派；用事件順序區分唯讀且無事件識別的紀錄。
+                (
+                  { roundNumber, kind, stage, actor, occurredAt, reassignment },
+                  index,
+                ) => (
+                  <li key={`${roundNumber}-${kind}-${stage}-${index}`}>
+                    <strong>
+                      {kind === "submitted"
+                        ? "送出簽核"
+                        : kind === "withdrawn"
+                          ? "撤回修改"
+                          : `${stage === "manager" ? "主管" : "財務"}${kind === "reassigned" ? "改派" : kind === "approved" ? "核准" : "駁回"}`}
+                    </strong>
+                    <p>
+                      {actor.userName}
+                      {" · "}
+                      <RequisitionTime value={occurredAt} />
+                    </p>
+                    <p>第 {roundNumber} 輪</p>
+                    {kind === "reassigned" && reassignment ? (
+                      <dl>
+                        <dt>原審核者</dt>
+                        <dd>{reassignment.previousReviewer.userName}</dd>
+                        <dt>接手審核者</dt>
+                        <dd>{reassignment.newReviewer.userName}</dd>
+                        <dt>改派原因</dt>
+                        <dd className="requisition-purpose">
+                          {reassignment.reason}
+                        </dd>
+                      </dl>
+                    ) : null}
+                  </li>
+                ),
+              )}
+            </ol>
+          ) : (
+            <p className="hint">目前沒有簽核歷程。</p>
           )}
-        </>
-      ) : null}
-      <h4>操作歷程</h4>
-      {history.length ? (
-        <ol aria-label="操作歷程">
-          {history.map(
-            // 同輪同關可多次改派；用事件順序區分唯讀且無事件識別的紀錄。
-            (
-              { roundNumber, kind, stage, actor, occurredAt, reassignment },
-              index,
-            ) => (
-              <li key={`${roundNumber}-${kind}-${stage}-${index}`}>
-                第 {roundNumber} 輪{" · "}
-                {kind === "submitted"
-                  ? "送出簽核"
-                  : kind === "withdrawn"
-                    ? "撤回修改"
-                    : `${stage === "manager" ? "主管" : "財務"}${kind === "reassigned" ? "改派" : kind === "approved" ? "核准" : "駁回"}`}
-                {" · "}
-                {actor.userName}
-                {" · "}
-                <RequisitionTime value={occurredAt} />
-                {kind === "reassigned" && reassignment ? (
-                  <dl>
-                    <dt>原審核者</dt>
-                    <dd>{reassignment.previousReviewer.userName}</dd>
-                    <dt>接手審核者</dt>
-                    <dd>{reassignment.newReviewer.userName}</dd>
-                    <dt>改派原因</dt>
-                    <dd className="requisition-purpose">
-                      {reassignment.reason}
-                    </dd>
-                  </dl>
-                ) : null}
-              </li>
-            ),
-          )}
-        </ol>
-      ) : (
-        <p className="hint">目前沒有簽核歷程。</p>
-      )}
+        </div>
+      </div>
     </>
   );
 }
@@ -271,19 +327,23 @@ export function RequisitionApprovals({
   // 保留獨立的寫入提示與讀取錯誤，避免成功後的讀取失敗改寫結果。
   const [list, setList] = useState<RequisitionSummaryDto[] | null>(null);
   const [detail, setDetail] = useState<RequisitionDetailDto | null>(null);
+  const [openingDetail, setOpeningDetail] = useState(false);
   const [retryId, setRetryId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(
     null,
   );
   const [readError, setReadError] = useState("");
+  // 欄位編輯與已套用條件分開保存，返回清單或手動重讀不會套用未送出的值。
+  const [filters, setFilters] = useState(emptyFilters);
+  const [appliedFilters, setAppliedFilters] = useState(emptyFilters);
   const listHeading = useRef<HTMLHeadingElement>(null);
   const detailHeading = useRef<HTMLHeadingElement>(null);
   const detailId = detail?.id;
 
-  // 只有清單與單筆之間切換時移動焦點，背景讀取不重設鍵盤位置。
+  // 切到載入、明細或返回清單時聚焦新標題，同一筆的背景讀取不改變焦點。
   useEffect(() => {
-    (detailId ? detailHeading : listHeading).current?.focus();
-  }, [detailId]);
+    (openingDetail || detailId ? detailHeading : listHeading).current?.focus();
+  }, [detailId, openingDetail]);
 
   // 共用清單 GET；重新載入後只顯示最新可見摘要。
   const loadList = useCallback(
@@ -334,10 +394,15 @@ export function RequisitionApprovals({
     };
   }, [beginOperation, finishOperation, loadList]);
 
-  // 回列表時重新套用查閱資格，避免繼續使用離開時的角色或狀態。
-  async function showList() {
+  // 套用條件、返回或重讀皆重新檢查目前查閱資格。
+  async function showList(nextFilters?: typeof emptyFilters) {
     if (!beginOperation()) return;
     try {
+      // 只有明確套用或清除才取代生效條件，其他清單重讀沿用原條件。
+      if (nextFilters) {
+        setFilters(nextFilters);
+        setAppliedFilters(nextFilters);
+      }
       // 清除目前選擇及該單的重讀入口；跨面板的未確認標記另存。
       setDetail(null);
       setRetryId(null);
@@ -352,7 +417,8 @@ export function RequisitionApprovals({
     if (!beginOperation()) return;
     setReadError("");
     if (detailId !== id) {
-      // 切換單筆時先移除原單，避免失敗後用新單的重讀狀態解除原單的限制。
+      // 切換單筆時立刻離開清單或原單，避免混用兩筆資料或把清單留在明細頁。
+      setOpeningDetail(true);
       setDetail(null);
       setNotice(null);
     }
@@ -410,6 +476,8 @@ export function RequisitionApprovals({
         setReadError("無法讀取請購結果，請重新讀取。");
       }
     } finally {
+      // 初次讀取失敗時回到清單側顯示原有的重讀入口。
+      setOpeningDetail(false);
       finishOperation();
     }
   }
@@ -469,6 +537,25 @@ export function RequisitionApprovals({
     }
   }
 
+  // 只比對這次授權讀回的摘要。狀態沿用清單原值，文字只查原始單號或主旨。
+  const query = appliedFilters.query.trim().toLowerCase();
+  const matchingList =
+    query || appliedFilters.status
+      ? list?.filter(({ number, subject, status }) => {
+          const matchesStatus =
+            !appliedFilters.status || status === appliedFilters.status;
+          const matchesQuery =
+            !query ||
+            number.toLowerCase().includes(query) ||
+            subject?.toLowerCase().includes(query);
+          return matchesStatus && matchesQuery;
+        })
+      : list;
+  const unapplied =
+    list !== null &&
+    (filters.query !== appliedFilters.query ||
+      filters.status !== appliedFilters.status);
+
   // 本次重讀與其他筆待核對結果各自保留，避免操作其他請購時清掉原提示。
   const pendingReadback = Object.entries(readbacks);
   const canAct =
@@ -476,15 +563,59 @@ export function RequisitionApprovals({
     retryId !== detailId &&
     !(detailId && readbacks[detailId]?.confirmed);
   return (
-    <section className="requisition-approvals" aria-labelledby="approval-title">
-      <h2 id="approval-title" tabIndex={-1} ref={listHeading}>
-        請購查閱與簽核
-      </h2>
+    <section className="requisition-approvals" aria-label="請購查閱與簽核">
       {detail ? (
-        <h3 tabIndex={-1} ref={detailHeading}>
-          請購明細 {detail.number}
-        </h3>
-      ) : null}
+        <>
+          <button
+            type="button"
+            className="text-control detail-back"
+            disabled={pending}
+            onClick={
+              // 離開明細時重讀清單，保留先前尚未核對的操作。
+              () => void showList()
+            }
+          >
+            <span aria-hidden="true">← </span>返回請購列表
+          </button>
+          <div className="detail-heading">
+            <div>
+              <h2 tabIndex={-1} ref={detailHeading}>
+                {detail.subject || "未填主旨"}
+              </h2>
+              <p className="identifier">{detail.number}</p>
+            </div>
+            <p className={`requisition-status status-${detail.status}`}>
+              {statusNames[detail.status]}
+            </p>
+          </div>
+        </>
+      ) : openingDetail ? (
+        <div className="page-heading">
+          <h2 tabIndex={-1} ref={detailHeading}>
+            請購明細
+          </h2>
+          <p className="hint" role="status">
+            正在讀取請購明細…
+          </p>
+        </div>
+      ) : (
+        <div className="page-heading">
+          <h2 tabIndex={-1} ref={listHeading}>
+            請購查閱與簽核
+          </h2>
+          <button
+            type="button"
+            className="secondary"
+            disabled={pending}
+            onClick={
+              // 手動重讀列表不會重新送出先前的簽核操作。
+              () => void showList()
+            }
+          >
+            重新讀取請購列表
+          </button>
+        </div>
+      )}
       {notice ? (
         <p
           className={notice.error ? "feedback error" : "feedback"}
@@ -589,83 +720,161 @@ export function RequisitionApprovals({
                 </button>
               </>
             ) : null}
-            <button
-              type="button"
-              className="secondary"
-              disabled={pending}
-              onClick={
-                // 離開明細時重讀清單，保留先前尚未核對的操作。
-                () => void showList()
-              }
-            >
-              返回請購列表
-            </button>
           </div>
           <RequisitionContent detail={detail} />
         </>
-      ) : (
+      ) : !openingDetail ? (
         <>
-          <button
-            type="button"
-            className="secondary"
-            disabled={pending}
-            onClick={
-              // 手動重讀列表不會重新送出先前的簽核操作。
-              () => void showList()
+          <form
+            aria-label="請購搜尋條件"
+            onSubmit={
+              // Enter 與套用按鈕都重讀可見清單，再依這次條件篩選。
+              (event) => {
+                event.preventDefault();
+                void showList(filters);
+              }
             }
           >
-            重新讀取請購列表
-          </button>
-          {list?.length ? (
-            <ul>
-              {list.map(
-                // 摘要狀態由伺服器提供；能查看與有權作決定分開顯示。
-                ({
-                  id,
-                  number,
-                  subject,
-                  applicant,
-                  status,
-                  estimatedAmount,
-                  paused,
-                  canDecide,
-                }) => (
-                  <li key={id}>
-                    <p>{subject || "未填主旨"}</p>
-                    <p className="hint">
-                      {applicant.userName}
-                      {" · "}
-                      {statusNames[status]}
-                      {" · "}
-                      {formatDraftAmount(estimatedAmount)}
-                      {paused ? " · 簽核暫停" : canDecide ? " · 待您簽核" : ""}
-                    </p>
-                    <button
-                      type="button"
-                      className="secondary"
-                      disabled={pending}
-                      onClick={
-                        // 單號辨識項目，實際以系統識別取得即時明細。
-                        () => void showDetail(id)
-                      }
-                    >
-                      {number}
-                    </button>
-                  </li>
-                ),
-              )}
-            </ul>
+            <fieldset className="approval-filter-grid" disabled={pending}>
+              <div className="approval-filter-field">
+                <label htmlFor="approval-query">主旨或單號</label>
+                <input
+                  id="approval-query"
+                  type="search"
+                  value={filters.query}
+                  onChange={
+                    // 保留原輸入，只有比對時才去除空白並統一大小寫。
+                    (event) =>
+                      setFilters({ ...filters, query: event.target.value })
+                  }
+                />
+              </div>
+              <div className="approval-filter-field">
+                <label htmlFor="approval-status">目前狀態</label>
+                <select
+                  id="approval-status"
+                  value={filters.status}
+                  onChange={
+                    // 使用與摘要相同的狀態值，選擇後等套用才改變清單。
+                    (event) =>
+                      setFilters({ ...filters, status: event.target.value })
+                  }
+                >
+                  <option value="">全部狀態</option>
+                  {Object.entries(statusNames).map(
+                    // 清單包含草稿與撤回修改中，選項沿用完整的簽核狀態名稱。
+                    ([status, label]) => (
+                      <option key={status} value={status}>
+                        {label}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </div>
+              <div className="requisition-actions">
+                <button type="submit">套用條件</button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={
+                    // 清空欄位及已套用條件後讀回完整的可見清單。
+                    () => void showList(emptyFilters)
+                  }
+                >
+                  清除條件
+                </button>
+              </div>
+            </fieldset>
+          </form>
+          {unapplied ? (
+            <p role="status">條件尚未套用，以下仍為上次結果。</p>
+          ) : null}
+          {matchingList?.length ? (
+            <div
+              className="table-frame"
+              role="region"
+              aria-label="請購列表"
+              tabIndex={0}
+            >
+              <table className="approval-table">
+                <thead>
+                  <tr>
+                    <th scope="col">主旨 / 單號</th>
+                    <th scope="col">申請人</th>
+                    <th scope="col">目前狀態</th>
+                    <th scope="col" className="money">
+                      預估申請金額
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {matchingList.map(
+                    // 摘要狀態由伺服器提供；能查看與有權作決定分開顯示。
+                    ({
+                      id,
+                      number,
+                      subject,
+                      applicant,
+                      status,
+                      estimatedAmount,
+                      paused,
+                      canDecide,
+                    }) => (
+                      <tr key={id}>
+                        <td>
+                          <button
+                            type="button"
+                            className="text-control approval-open"
+                            disabled={pending}
+                            onClick={
+                              // 顯示完整單號，實際以系統識別取得即時明細。
+                              () => void showDetail(id)
+                            }
+                          >
+                            <span className="subject">
+                              {subject || "未填主旨"}
+                            </span>
+                            <span className="identifier">{number}</span>
+                          </button>
+                        </td>
+                        <td>{applicant.userName}</td>
+                        <td>
+                          <span
+                            className={`requisition-status status-${status}`}
+                          >
+                            {statusNames[status]}
+                          </span>
+                          {paused || canDecide ? (
+                            <span className="status-note">
+                              {paused ? "簽核暫停" : "待您簽核"}
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="money">
+                          {formatDraftAmount(estimatedAmount)}
+                          <span className="row-chevron" aria-hidden="true">
+                            ›
+                          </span>
+                        </td>
+                      </tr>
+                    ),
+                  )}
+                </tbody>
+              </table>
+            </div>
           ) : (
             <p>
               {list
-                ? "目前沒有可查閱的請購。"
+                ? list.length
+                  ? "沒有符合搜尋條件的請購。"
+                  : "目前沒有可查閱的請購。"
                 : pending
                   ? "正在讀取請購…"
                   : "尚未取得請購列表。"}
             </p>
           )}
         </>
-      )}
+      ) : null}
     </section>
   );
 }

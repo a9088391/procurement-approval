@@ -194,7 +194,7 @@ export function RequisitionReports({
       // 下載已開始後只重讀相同條件的報表，讓畫面跟上目前授權。
       await loadReport(criteria, undefined, "已開始下載 CSV。");
     } catch (error) {
-      // 失敗時先恢復目前報表，是否再下載由使用者決定。
+      // 身分或防偽拒絕交由既有身分恢復處理。其餘失敗須手動重新套用條件後才能再次下載。
       showError(error, "無法下載 CSV，請重新套用條件後再下載。");
     } finally {
       finishOperation();
@@ -224,7 +224,7 @@ export function RequisitionReports({
     return duplicateNames.has(name) ? `${name} · ${id}` : name;
   }
 
-  // 先顯示條件與狀態，再列出同一批資料的分組與每張請購。
+  // 分組統計與請購清單共用已套用條件，各自發送請求並使用獨立交易查詢。
   return (
     <section className="requisition-reports" aria-labelledby="reports-title">
       <h2 id="reports-title" ref={heading} tabIndex={-1}>
@@ -236,73 +236,83 @@ export function RequisitionReports({
         部門選項來自本次結果，可選「全部部門」後重新套用。
       </p>
       <form aria-label="報表條件" onSubmit={submitFilters}>
-        <fieldset disabled={pending}>
-          <label htmlFor="report-start">起日（臺灣時間）</label>
-          <input
-            id="report-start"
-            type="date"
-            value={criteria.startDate}
-            onChange={
-              // 日期欄提供日曆字串，保留臺灣時間解讀給 API。
-              (event) => changeCriterion("startDate", event.target.value)
-            }
-          />
-          <label htmlFor="report-end">迄日（臺灣時間）</label>
-          <input
-            id="report-end"
-            type="date"
-            value={criteria.endDate}
-            onChange={
-              // 迄日直接傳送使用者選定的日期，不從瀏覽器時區換算。
-              (event) => changeCriterion("endDate", event.target.value)
-            }
-          />
-          <label htmlFor="report-department">送審部門</label>
-          <select
-            id="report-department"
-            value={
-              missingDepartment ? unavailableDepartment : criteria.departmentId
-            }
-            onChange={
-              // 名稱可能隨快照改變，篩選只使用部門識別。
-              (event) => changeCriterion("departmentId", event.target.value)
-            }
-          >
-            <option value="">{allDepartments}</option>
-            {missingDepartment ? (
-              <option value={unavailableDepartment} disabled>
-                先前選擇的部門
-              </option>
-            ) : null}
-            {Array.from(
-              departments.values(),
-              // 只顯示由這次報表結果取得的部門。
-              (department) => (
-                <option key={department.id} value={department.id}>
-                  {departmentLabel(department)}
+        <fieldset className="report-filter-grid" disabled={pending}>
+          <div className="report-filter-field">
+            <label htmlFor="report-start">起日（臺灣時間）</label>
+            <input
+              id="report-start"
+              type="date"
+              value={criteria.startDate}
+              onChange={
+                // 日期欄提供日曆字串，保留臺灣時間解讀給 API。
+                (event) => changeCriterion("startDate", event.target.value)
+              }
+            />
+          </div>
+          <div className="report-filter-field">
+            <label htmlFor="report-end">迄日（臺灣時間）</label>
+            <input
+              id="report-end"
+              type="date"
+              value={criteria.endDate}
+              onChange={
+                // 迄日直接傳送使用者選定的日期，不從瀏覽器時區換算。
+                (event) => changeCriterion("endDate", event.target.value)
+              }
+            />
+          </div>
+          <div className="report-filter-field">
+            <label htmlFor="report-department">送審部門</label>
+            <select
+              id="report-department"
+              value={
+                missingDepartment
+                  ? unavailableDepartment
+                  : criteria.departmentId
+              }
+              onChange={
+                // 名稱可能隨快照改變，篩選只使用部門識別。
+                (event) => changeCriterion("departmentId", event.target.value)
+              }
+            >
+              <option value="">{allDepartments}</option>
+              {missingDepartment ? (
+                <option value={unavailableDepartment} disabled>
+                  先前選擇的部門
                 </option>
-              ),
-            )}
-          </select>
-          <label htmlFor="report-status">目前狀態</label>
-          <select
-            id="report-status"
-            value={criteria.status}
-            onChange={
-              // 送出後端接受的狀態值，顯示沿用簽核標籤。
-              (event) => changeCriterion("status", event.target.value)
-            }
-          >
-            <option value="">全部狀態</option>
-            {submittedStatuses.map(
-              // 暫停仍屬原待審關卡，因此只有四個已送審狀態。
-              (status) => (
-                <option key={status} value={status}>
-                  {statusNames[status]}
-                </option>
-              ),
-            )}
-          </select>
+              ) : null}
+              {Array.from(
+                departments.values(),
+                // 只顯示由這次報表結果取得的部門。
+                (department) => (
+                  <option key={department.id} value={department.id}>
+                    {departmentLabel(department)}
+                  </option>
+                ),
+              )}
+            </select>
+          </div>
+          <div className="report-filter-field">
+            <label htmlFor="report-status">目前狀態</label>
+            <select
+              id="report-status"
+              value={criteria.status}
+              onChange={
+                // 送出後端接受的狀態值，顯示沿用簽核標籤。
+                (event) => changeCriterion("status", event.target.value)
+              }
+            >
+              <option value="">全部狀態</option>
+              {submittedStatuses.map(
+                // 暫停仍屬原待審關卡，因此只有四個已送審狀態。
+                (status) => (
+                  <option key={status} value={status}>
+                    {statusNames[status]}
+                  </option>
+                ),
+              )}
+            </select>
+          </div>
           <div className="requisition-actions">
             <button type="submit">套用條件</button>
             <button
@@ -339,6 +349,65 @@ export function RequisitionReports({
       ) : null}
       {report ? (
         <>
+          <h3 id="report-list">符合條件的請購</h3>
+          {report.list.length ? (
+            <div
+              className="table-frame"
+              role="region"
+              aria-label="符合條件的請購清單，可水平捲動"
+              tabIndex={0}
+            >
+              <table className="report-table" aria-labelledby="report-list">
+                <thead>
+                  <tr>
+                    <th scope="col">單號</th>
+                    <th scope="col">主旨</th>
+                    <th scope="col">申請人</th>
+                    <th scope="col">送審部門</th>
+                    <th scope="col">目前狀態</th>
+                    <th scope="col" className="money">
+                      預估金額
+                    </th>
+                    <th scope="col">最近送審時間</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.list.map(
+                    // 使用最近送審快照；暫停可辨識但仍顯示原待審狀態。
+                    ({
+                      id,
+                      number,
+                      subject,
+                      applicant,
+                      status,
+                      estimatedAmount,
+                      paused,
+                      round,
+                    }) => (
+                      <tr key={id}>
+                        <td>{number}</td>
+                        <td>{subject}</td>
+                        <td>{applicant.userName}</td>
+                        <td>{round.department.name}</td>
+                        <td>
+                          {statusNames[status]}
+                          {paused ? " · 簽核暫停" : ""}
+                        </td>
+                        <td className="money">
+                          {formatDraftAmount(estimatedAmount)}
+                        </td>
+                        <td>
+                          <RequisitionTime value={round.submittedAt} />
+                        </td>
+                      </tr>
+                    ),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p>沒有符合條件的請購。</p>
+          )}
           <h3 id="report-groups">依送審部門與目前狀態統計</h3>
           {report.groups.length ? (
             <ul aria-labelledby="report-groups">
@@ -362,39 +431,6 @@ export function RequisitionReports({
             </ul>
           ) : (
             <p>沒有符合條件的統計。</p>
-          )}
-          <h3 id="report-list">符合條件的請購</h3>
-          {report.list.length ? (
-            <ul aria-labelledby="report-list">
-              {report.list.map(
-                // 使用最近送審快照；暫停可辨識但仍顯示原待審狀態。
-                ({
-                  id,
-                  number,
-                  subject,
-                  applicant,
-                  status,
-                  estimatedAmount,
-                  paused,
-                  round,
-                }) => (
-                  <li key={id}>
-                    <p>{subject}</p>
-                    <p className="hint">
-                      {number} · {applicant.userName} · {round.department.name}
-                    </p>
-                    <p className="hint">
-                      {statusNames[status]}
-                      {paused ? " · 簽核暫停" : ""} ·{" "}
-                      {formatDraftAmount(estimatedAmount)} ·{" "}
-                      <RequisitionTime value={round.submittedAt} />
-                    </p>
-                  </li>
-                ),
-              )}
-            </ul>
-          ) : (
-            <p>沒有符合條件的請購。</p>
           )}
         </>
       ) : null}

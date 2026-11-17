@@ -149,6 +149,7 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
                 SubmittedAt = now,
                 Content = JsonSerializer.Serialize(Snapshot(draft), JsonSerializerOptions.Web)
             };
+            // 新輪次、送審事件與待審狀態／版本須在同一交易提交，避免留下不完整送審歷程。
             round.History.Add(new RequisitionApprovalEvent
             {
                 Kind = RequisitionApprovalEvent.Submitted,
@@ -324,7 +325,10 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
 
     // 待辦清單和寫入採相同範圍，包含待審中的暫停案件。
     private IQueryable<CurrentWorkflow> PendingWorkflows() =>
-        CurrentWorkflows().Where(w => w.Round != null && (w.WaitingManager || w.WaitingFinance));
+        CurrentWorkflows()
+            .Where(w => w.Round != null
+                && (w.WaitingManager
+                    || w.WaitingFinance));
 
     // 只投影具該關角色的啟用業務帳號，避免在管理改派讀取不相干的帳號資料。
     private Task<RequisitionPerson[]> ReviewerPeople(string role, CancellationToken ct)
@@ -556,7 +560,8 @@ internal sealed class RequisitionApprovalService(AuthDb db, AuthService auth, Ti
         var editable = summary.Status is Requisition.DraftStatus or Requisition.Withdrawn;
         var previous = owner
             && round is not null
-            && (editable || round.Number > 1)
+            && (editable
+                || round.Number > 1)
                 ? await PreviousRounds(summary.Id, editable ? round.Number : round.Number - 1, ct)
                 : [];
         if (editable)

@@ -91,6 +91,35 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
             return Results.NoContent();
         }, ct);
 
+    // 一次停用一個或多個部門，保留既有帳號歸屬及送審快照。
+    public Task<IResult> DeactivateDepartments(
+        DeactivateOrganizationRequest? request, ClaimsPrincipal principal, CancellationToken ct) =>
+        RunAsAdmin(principal, async _ =>
+        {
+            // 先驗證所有識別及版本欄位，再以同一查詢取得整批部門。
+            if (!TryReadDeactivation(request, out var versions))
+                return Invalid("請提供不重複的停用目標及各筆目前版本。");
+            var ids = versions.Keys.ToArray();
+            var departments = await db
+                .Departments
+                .Where(d => ids.Contains(d.Id))
+                .ToArrayAsync(ct);
+
+            // 組織鎖保護版本檢查；任一目標不存在或過期都不更動任何部門。
+            if (departments.Length != ids.Length)
+                return NotFound();
+            if (departments.Any(d => d.Version != versions[d.Id]))
+                return Stale();
+
+            // 只更動仍啟用的資料列，維持原有名稱與穩定識別。
+            foreach (var department in departments.Where(d => d.Active))
+            {
+                department.Active = false;
+                department.Version = Guid.NewGuid().ToString("N");
+            }
+            return Results.NoContent();
+        }, ct);
+
     // 建立業務帳號及初始角色，並要求使用者登入後更換臨時密碼。
     public Task<IResult> CreateAccount(
         CreateBusinessAccountRequest request, ClaimsPrincipal principal, CancellationToken ct) =>
@@ -163,7 +192,8 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
             var finance = request.FinanceReviewerId;
             if (manager == user.Id
                 || finance == user.Id
-                || (manager is not null && manager == finance))
+                || (manager is not null
+                    && manager == finance))
                 return Invalid("兩關審核人必須不同，且不可選擇本人。");
             if (!await EligibleReviewer(manager, user.ManagerReviewerId, Manager, ct)
                 || !await EligibleReviewer(finance, user.FinanceReviewerId, Finance, ct))
@@ -178,6 +208,45 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
             await SetRoles(user.Id, isManager, isFinance, newAccount: false, ct);
             if (!active)
                 await auth.RevokeSessions(user.Id, ct);
+            return Results.NoContent();
+        }, ct);
+
+    // 批次停用只改業務帳號狀態，與登入及憑證異動共用同一組帳號列鎖。
+    public Task<IResult> DeactivateAccounts(
+        DeactivateOrganizationRequest? request, ClaimsPrincipal principal, CancellationToken ct) =>
+        RunAsAdmin(principal, async _ =>
+        {
+            // 先檢查整批輸入，再依識別排序取鎖，避免由傳入順序決定持鎖次序。
+            if (!TryReadDeactivation(request, out var versions))
+                return Invalid("請提供不重複的停用目標及各筆目前版本。");
+            var users = new List<AppUser>(versions.Count);
+            foreach (var id in versions.Keys.Order(StringComparer.Ordinal))
+            {
+                // 與單筆編輯一致，找不到目標與管理帳號使用相同回應。
+                var user = await auth.LockUser(id, ct);
+                if (user is null || user.AccountType != "business")
+                    return NotFound();
+                users.Add(user);
+            }
+
+            // 在鎖內確認全部版本，包含原本已停用的目標。
+            if (users.Any(u => u.ConcurrencyStamp != versions[u.Id]))
+                return Stale();
+            var activeUsers = users.Where(u => u.Active).ToArray();
+            if (activeUsers.Length == 0)
+                return Results.NoContent();
+
+            // 逐筆取鎖會清除舊追蹤。先以讀取時的版本附加，再異動狀態及版本。
+            db.Users.AttachRange(activeUsers);
+            foreach (var user in activeUsers)
+            {
+                user.Active = false;
+                user.ConcurrencyStamp = Guid.NewGuid().ToString();
+            }
+
+            // 同一交易撤銷所有剛停用帳號的登入，重新啟用後舊 Cookie 仍無法使用。
+            var activeIds = activeUsers.Select(u => u.Id).ToArray();
+            await auth.RevokeSessions(activeIds, ct);
             return Results.NoContent();
         }, ct);
 
@@ -240,6 +309,28 @@ internal sealed class OrganizationService(AuthDb db, AuthService auth, IPassword
             await tx.CommitAsync(ct);
         }
         return result;
+    }
+
+    // 以原始識別對應版本，拒絕空清單、缺少欄位及同批重複目標。
+    private static bool TryReadDeactivation(DeactivateOrganizationRequest? request, out Dictionary<string, string> versions)
+    {
+        // 使用與資料庫識別相同的精確比對，避免將不同的輸入目標視為同一筆。
+        versions = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (request?.Items is not { Length: > 0 } items)
+            return false;
+
+        // 不修剪不透明值，並拒絕空白或含資料庫無法儲存的 NUL。
+        foreach (var item in items)
+        {
+            if (item is not { Id: { } id, Version: { } version }
+                || string.IsNullOrWhiteSpace(id)
+                || string.IsNullOrWhiteSpace(version)
+                || !ValidId(id)
+                || !ValidId(version)
+                || !versions.TryAdd(id, version))
+                return false;
+        }
+        return true;
     }
 
     // 新歸屬只能分配到現有啟用部門；呼叫端持組織鎖，檢查後不會被同時停用。

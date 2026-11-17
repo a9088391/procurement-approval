@@ -10,6 +10,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // 指派欄位允許 NULL，既有帳號升級後可維持未分配，且不會因此被要求改密碼。
             migrationBuilder.AddColumn<string>(
                 name: "DepartmentId",
                 table: "AspNetUsers",
@@ -92,6 +93,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // 降版會刪除部門、指派設定及強制改密碼狀態，既有帳號識別與憑證欄位仍保留。
             migrationBuilder.DropForeignKey(
                 name: "FK_AspNetUsers_AspNetUsers_FinanceReviewerId",
                 table: "AspNetUsers");

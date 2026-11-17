@@ -23,7 +23,8 @@ public sealed class RequisitionApprovalTests
 
         // 一般清單提供自己的草稿；詳細結果還沒有送審輪次或操作歷程。
         var list = await owner.GetFromJsonAsync<JsonElement>(RequisitionsPath);
-        Assert.Equal(id, Assert.Single(list.EnumerateArray()).GetProperty("id").GetGuid());
+        var listedDraft = Assert.Single(list.EnumerateArray());
+        Assert.Equal(id, listedDraft.GetProperty("id").GetGuid());
         using var response = await owner.GetAsync($"{RequisitionsPath}/{id}");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var detail = await response.Content.ReadFromJsonAsync<JsonElement>();

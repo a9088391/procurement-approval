@@ -185,8 +185,10 @@ async function checkDraftLayout(page: Page, region: Locator) {
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
+    // 草稿區塊可見時，左右邊界都須落在實際 viewport 內。
     const box = await region.boundingBox();
-    expect(box !== null && box.x >= 0 && box.x + box.width <= width).toBe(true);
+    const meetsLeftBoundary = box !== null && box.x >= 0;
+    expect(meetsLeftBoundary && box.x + box.width <= width).toBe(true);
   }
 }
 

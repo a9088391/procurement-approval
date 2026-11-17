@@ -196,7 +196,8 @@ export function Reassignments({
   async function submit(event: FormEvent<HTMLFormElement>) {
     // 待核對或待辦已失效時即使有重複表單事件，也不允許送出。
     event.preventDefault();
-    if (!item || !editor || readback) return;
+    if (!item || !editor) return;
+    if (readback) return;
     const form = event.currentTarget;
     const values = new FormData(form);
     const reviewer = form.elements.namedItem("reviewer") as HTMLSelectElement;
@@ -209,8 +210,9 @@ export function Reassignments({
       /^\p{White_Space}+|\p{White_Space}+$/gu,
       "",
     );
-    const reasonRejected =
-      !reason || reason.length > 500 || reason.includes("\0");
+    // 長度不合格可直接拒絕，合格時才檢查是否有 NUL 供欄位提示使用。
+    const invalidReasonLength = !reason || reason.length > 500;
+    const reasonRejected = invalidReasonLength || reason.includes("\0");
     setInvalidReason(reasonRejected);
 
     // 檢查可見角色選項及 UTF-16 長度，明確拒絕時留在原表單供修正。
@@ -276,8 +278,9 @@ export function Reassignments({
     // 只用目前清單中的案件及版本組裝可編輯資料。
     ({ id }) => id === selectedId,
   );
+  const hasSelectedEditor = item !== undefined && editor !== null;
   const candidates =
-    item && editor && snapshot
+    hasSelectedEditor && snapshot
       ? (editor.stage === "manager"
           ? snapshot.managers
           : snapshot.finances

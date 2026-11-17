@@ -21,6 +21,14 @@ internal sealed record CreateDepartmentRequest(string? Name);
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed record UpdateDepartmentRequest(string? Name, bool? Active, string? Version);
 
+// 停用只接受明列的目標，缺少清單或為 null 都交由服務回報輸入錯誤。
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record DeactivateOrganizationRequest(OrganizationDeactivationItem?[]? Items);
+
+// 每筆目標都須帶讀取時的版本，拒絕夾帶狀態或其他設定欄位。
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record OrganizationDeactivationItem(string? Id, string? Version);
+
 // 新業務帳號需要臨時密碼及部門，角色選項只接受主管與財務。
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed record CreateBusinessAccountRequest(

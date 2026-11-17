@@ -254,6 +254,12 @@ public sealed class AuthService(AuthDb db, IPasswordHasher<AppUser> hasher, Time
         .Where(s => s.UserId == userId)
         .ExecuteDeleteAsync(ct);
 
+    // 呼叫端已持有所有目標列鎖，在同一交易用一次查詢撤銷整批剛停用的帳號登入。
+    internal Task RevokeSessions(string[] userIds, CancellationToken ct) => db
+        .Sessions
+        .Where(s => userIds.Contains(s.UserId))
+        .ExecuteDeleteAsync(ct);
+
     // 撤銷目前登入並清除 Cookie。以單筆登入紀錄為範圍，保留其他裝置的登入。
     public async Task<IResult> Logout(HttpContext http, CancellationToken ct)
     {

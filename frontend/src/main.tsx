@@ -8,6 +8,8 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, readSession, writeAuth, type IdentityDto } from "./api";
+import { ChangePasswordForm } from "./ChangePasswordForm";
+import { LoginForm } from "./LoginForm";
 import { Organization } from "./Organization";
 import { Reassignments, type ReassignmentReadback } from "./Reassignments";
 import {
@@ -44,6 +46,8 @@ function App() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [unknownResult, setUnknownResult] = useState(false);
+  // 選用的改密碼表單預設收合，強制改密碼由身分資料決定。
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const [unknownOrganizationFor, setUnknownOrganizationFor] = useState<
     string | null
   >(null);
@@ -98,16 +102,25 @@ function App() {
     setPending(false);
   }, []);
 
-  // 受保護端點拒絕身分或防偽時，先移除資料，再由使用者重新確認。
-  const recoverProtectedSession = useCallback((notice: string) => {
-    // 清除舊權杖及表單；確認訊息仍由發出原操作的帳號持有。
-    protectedRecovery.current = true;
-    token.current = "";
+  // 離開已確認身分時一併重設改密碼表單的展開狀態，避免重讀後沿用。
+  const clearConfirmedIdentity = useCallback(() => {
     setIdentity(null);
-    setMessage(notice);
-    setIsError(true);
-    setPhase("recovery");
+    setPasswordOpen(false);
   }, []);
+
+  // 受保護端點拒絕身分或防偽時，先移除資料，再由使用者重新確認。
+  const recoverProtectedSession = useCallback(
+    (notice: string) => {
+      // 清除舊權杖及表單；確認訊息仍由發出原操作的帳號持有。
+      protectedRecovery.current = true;
+      token.current = "";
+      clearConfirmedIdentity();
+      setMessage(notice);
+      setIsError(true);
+      setPhase("recovery");
+    },
+    [clearConfirmedIdentity],
+  );
 
   // 保存或清除目前管理帳號的確認；固定回呼讓面板不因標記改變而重新查詢。
   const markOrganizationWrite = useCallback(
@@ -277,7 +290,7 @@ function App() {
     if (!beginOperation()) return;
     rememberUnknownDraft();
     setPhase("loading");
-    setIdentity(null);
+    clearConfirmedIdentity();
 
     // 讀取成功後才顯示對應表單；先前不確定的寫入提示仍由原狀態保留。
     try {
@@ -382,7 +395,7 @@ function App() {
       }
 
       // 先卸載舊表單並記下此操作的成功提示，再查證切換後的身分。
-      setIdentity(null);
+      clearConfirmedIdentity();
       setPhase("loading");
       setMessage(
         operation === "change-password"
@@ -423,7 +436,7 @@ function App() {
       } else if (!(error instanceof ApiError) || error.status >= 500) {
         // 未能確認寫入結果時先卸載表單，保留警示並等待使用者重讀。
         rememberUnknownDraft();
-        setIdentity(null);
+        clearConfirmedIdentity();
         setPhase("recovery");
         setUnknownResult(true);
       } else {
@@ -436,7 +449,7 @@ function App() {
         ) {
           // 舊身分、權杖或版本已無法使用，清除表單並提示恢復後再操作。
           rememberUnknownDraft();
-          setIdentity(null);
+          clearConfirmedIdentity();
           setPhase("recovery");
           setMessage(`${error.message} 請重新確認身分後，由您再次操作。`);
           if (error.code === "unauthenticated") {
@@ -464,316 +477,295 @@ function App() {
     reassignmentContext?.actor === actorName ? reassignmentContext : null;
   const reassignmentActive = currentReassignment?.active === true;
 
+  // 未登入與身分待確認共用同一個手動讀回入口。
+  const refreshControl = (
+    <button
+      className="text-control identity-refresh"
+      type="button"
+      disabled={pending || phase === "loading"}
+      onClick={
+        // 此按鈕只重讀身分，保留任何尚未確認的寫入提示。
+        () => void refresh()
+      }
+    >
+      重新確認身分
+    </button>
+  );
+
   // 僅 ready 掛載身分對應的表單；離開 ready 即清除 DOM 中的敏感輸入。
   return (
-    <main>
-      <header>
-        <p className="eyebrow">本機展示</p>
-        <h1>請購簽核</h1>
-        <p>登入、請購草稿、簽核、統計與組織管理</p>
+    <>
+      <header className={identity ? "masthead" : "masthead masthead-anonymous"}>
+        <div className="frame masthead-inner">
+          <h1 className="wordmark">
+            <svg
+              viewBox="0 0 24 28"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 2.5h10l6 6v17H4zM14 2.5v6h6M8 13h8m-8 5h8m-8 4h5" />
+            </svg>
+            請購簽核
+          </h1>
+          {phase === "ready" && identity ? (
+            <section className="account" aria-labelledby="identity-title">
+              <h2 id="identity-title" className="visually-hidden">
+                目前身分
+              </h2>
+              <dl className="account-identity">
+                <dt className="visually-hidden">帳號</dt>
+                <dd className="account-name">{identity.userName}</dd>
+                <dt className="visually-hidden">帳號類別</dt>
+                <dd className="visually-hidden">
+                  {identity.accountType === "admin" ? "管理帳號" : "業務帳號"}
+                </dd>
+                <dt className="visually-hidden">角色</dt>
+                <dd className="account-roles">
+                  {
+                    // 保留未知角色代碼，避免身分摘要隱去伺服器回傳的角色。
+                    identity.roles
+                      .map((role) => roleNames[role] ?? role)
+                      .join("、") ||
+                      (identity.accountType === "admin"
+                        ? "管理帳號"
+                        : "業務帳號")
+                  }
+                </dd>
+              </dl>
+              {!identity.mustChangePassword ? (
+                <button
+                  className="text-control"
+                  type="button"
+                  aria-label="變更密碼表單"
+                  aria-controls="password-panel"
+                  aria-expanded={passwordOpen}
+                  disabled={pending}
+                  onClick={
+                    // 僅展開表單；是否離開草稿仍由提交時的共用確認決定。
+                    () => setPasswordOpen(!passwordOpen)
+                  }
+                >
+                  變更密碼
+                </button>
+              ) : null}
+              <button
+                className="text-control account-logout"
+                type="button"
+                disabled={pending}
+                onClick={
+                  // 登出沒有表單輸入，直接交由共用寫入與重讀流程。
+                  () => void submit("logout")
+                }
+              >
+                登出
+              </button>
+            </section>
+          ) : null}
+        </div>
       </header>
-      {message || unknownResult ? (
-        // 合併一般與未知結果提示；未知結果即使沒有新錯誤仍須以警示呈現。
-        <p
-          className={isError || unknownResult ? "feedback error" : "feedback"}
-          role={isError || unknownResult ? "alert" : "status"}
-        >
-          {unknownResult ? unknownHint : ""} {message}
-        </p>
-      ) : null}
-      {phase === "loading" ? (
-        // 讀取期間用狀態訊息回饋，避免尚未確認身分就顯示表單。
-        <p role="status">正在確認身分…</p>
-      ) : null}
-      {phase === "recovery" ? (
-        // 尚未確認身分時說明手動恢復的用途，讓使用者知道這一步只讀取。
-        <section aria-labelledby="recovery-title" ref={recovery} tabIndex={-1}>
-          <h2 id="recovery-title">請先確認登入狀態</h2>
-          <p>重新取得安全權杖與目前身分，不會重送先前的操作。</p>
-        </section>
-      ) : null}
-      {phase === "ready" && !identity ? (
-        // 身分已確認為匿名時顯示登入表單，由共用提交函式接管原生提交。
-        <section aria-labelledby="login-title">
-          <h2 id="login-title">登入</h2>
-          <form
+      <main className={identity ? "frame workspace" : "auth-card"}>
+        {message || unknownResult ? (
+          // 合併一般與未知結果提示；未知結果即使沒有新錯誤仍須以警示呈現。
+          <p
+            className={isError || unknownResult ? "feedback error" : "feedback"}
+            role={isError || unknownResult ? "alert" : "status"}
+          >
+            {unknownResult ? unknownHint : ""} {message}
+          </p>
+        ) : null}
+        {phase === "loading" ? (
+          // 讀取期間用狀態訊息回饋，避免尚未確認身分就顯示表單。
+          <p role="status">正在確認身分…</p>
+        ) : null}
+        {phase === "recovery" ? (
+          // 尚未確認身分時說明手動恢復的用途，讓使用者知道這一步只讀取。
+          <section
+            aria-labelledby="recovery-title"
+            ref={recovery}
+            tabIndex={-1}
+          >
+            <h2 id="recovery-title">請先確認登入狀態</h2>
+            <p>重新取得安全權杖與目前身分，不會重送先前的操作。</p>
+          </section>
+        ) : null}
+        {phase === "ready" && !identity ? (
+          // 身分已確認為匿名時顯示登入表單，由共用提交函式接管原生提交。
+          <LoginForm
+            pending={pending}
             onSubmit={
-              // 交由共用提交函式讀取欄位，讓登入也受相同的重複送出保護。
+              // 交由共用提交函式同步擷取欄位並保護重複送出。
               (event) => void submit("login", event)
             }
-          >
-            <fieldset disabled={pending}>
-              <label htmlFor="userName">帳號</label>
-              <input
-                id="userName"
-                name="userName"
-                autoComplete="username"
-                required
-                maxLength={256}
-              />
-              <label htmlFor="password">密碼</label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                minLength={12}
-                maxLength={128}
-                aria-describedby="password-help"
-              />
-              <p id="password-help" className="hint">
-                密碼須為 12–128 個字元，不會移除空白。
-              </p>
-              <button type="submit">{pending ? "處理中…" : "登入"}</button>
-            </fieldset>
-          </form>
-        </section>
-      ) : null}
-      {phase === "ready" && identity ? (
-        // 已確認登入時才顯示身分與敏感操作，讓表單隨身分階段卸載。
-        <>
-          <section aria-labelledby="identity-title">
-            <h2 id="identity-title">目前身分</h2>
-            <dl>
-              <dt>帳號</dt>
-              <dd>{identity.userName}</dd>
-              <dt>帳號類別</dt>
-              <dd>
-                {identity.accountType === "admin" ? "管理帳號" : "業務帳號"}
-              </dd>
-              <dt>角色</dt>
-              <dd>
-                {
-                  // 逐一轉換已知角色，保留未知代碼供接手者辨識，再串成畫面文字。
-                  identity.roles
-                    .map((role) => roleNames[role] ?? role)
-                    .join("、")
-                }
-              </dd>
-            </dl>
-            <button
-              type="button"
-              disabled={pending}
-              onClick={
-                // 登出沒有表單輸入，直接交由共用寫入與重讀流程。
-                () => void submit("logout")
-              }
-            >
-              登出
-            </button>
-          </section>
-          <section aria-labelledby="change-title">
-            <h2 id="change-title">變更密碼</h2>
-            {identity.mustChangePassword ? (
-              <p className="feedback" role="status">
-                請先變更臨時密碼。新密碼須與臨時密碼不同，變更後請用新密碼重新登入。
-              </p>
-            ) : null}
-            <p className="hint">變更後，包含本次在內的所有登入都會失效。</p>
-            <form
+          />
+        ) : null}
+        {phase === "ready" && identity ? (
+          // 已確認登入時才顯示身分與敏感操作，讓表單隨身分階段卸載。
+          <>
+            <ChangePasswordForm
+              mustChangePassword={identity.mustChangePassword}
+              passwordOpen={passwordOpen}
+              pending={pending}
               onSubmit={
-                // 將表單事件交給共用流程，讓它在等待回應前取得輸入快照。
+                // 交由共用流程在等待回應前取得輸入快照。
                 (event) => void submit("change-password", event)
               }
-            >
-              <fieldset disabled={pending}>
-                <label htmlFor="currentPassword">目前密碼</label>
-                <input
-                  id="currentPassword"
-                  name="currentPassword"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  minLength={12}
-                  maxLength={128}
-                />
-                <label htmlFor="newPassword">新密碼</label>
-                <input
-                  id="newPassword"
-                  name="newPassword"
-                  type="password"
-                  autoComplete="new-password"
-                  required
-                  minLength={12}
-                  maxLength={128}
-                  aria-describedby="new-password-help"
-                />
-                <p id="new-password-help" className="hint">
-                  12–128 個字元；請自行安全保存新密碼。
-                </p>
-                <button type="submit">
-                  {pending ? "處理中…" : "變更密碼"}
-                </button>
-              </fieldset>
-            </form>
-          </section>
-          {identity.accountType === "admin" &&
-          identity.roles.includes("Administrator") &&
-          identity.mustChangePassword === false ? (
-            // 確認管理資格並解除改密碼限制後，只掛載選擇的管理面板。
-            <>
-              <nav className="requisition-actions" aria-label="管理功能">
-                <button
-                  type="button"
-                  className="secondary"
-                  aria-pressed={!reassignmentActive}
-                  disabled={pending}
-                  onClick={
-                    // 選中原面板時保留畫面及焦點。
-                    () => {
-                      if (reassignmentActive) switchAdminPanel(false);
+            />
+            {identity.accountType === "admin" &&
+            identity.roles.includes("Administrator") &&
+            identity.mustChangePassword === false ? (
+              // 確認管理資格並解除改密碼限制後，只掛載選擇的管理面板。
+              <>
+                <nav className="panel-nav" aria-label="管理功能">
+                  <button
+                    type="button"
+                    aria-pressed={!reassignmentActive}
+                    disabled={pending}
+                    onClick={
+                      // 選中原面板時保留畫面及焦點。
+                      () => {
+                        if (reassignmentActive) switchAdminPanel(false);
+                      }
                     }
-                  }
-                >
-                  組織管理
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  aria-pressed={reassignmentActive}
-                  disabled={pending}
-                  onClick={
-                    // 只有管理員切換到改派面板時才讀取待辦。
-                    () => {
-                      if (!reassignmentActive) switchAdminPanel(true);
+                  >
+                    組織管理
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={reassignmentActive}
+                    disabled={pending}
+                    onClick={
+                      // 只有管理員切換到改派面板時才讀取待辦。
+                      () => {
+                        if (!reassignmentActive) switchAdminPanel(true);
+                      }
                     }
-                  }
-                >
-                  有限改派
-                </button>
-              </nav>
-              {!reassignmentActive && currentReassignment?.readback ? (
-                <p role="status">「有限改派」有待讀取的結果。</p>
-              ) : null}
-              {reassignmentActive ? (
-                <Reassignments
-                  key={identity.userName}
-                  getToken={getProtectedToken}
-                  pending={pending}
-                  beginOperation={beginOperation}
-                  finishOperation={finishOperation}
-                  onSessionInvalid={recoverProtectedSession}
-                  readback={currentReassignment.readback}
-                  onReadbackChange={markReassignmentWrite}
-                />
-              ) : (
-                <Organization
-                  key={identity.userName}
-                  getToken={getProtectedToken}
-                  pending={pending}
-                  beginOperation={beginOperation}
-                  finishOperation={finishOperation}
-                  onSessionInvalid={recoverProtectedSession}
-                  confirmedWrite={
-                    organizationConfirmation?.actor === identity.userName
-                      ? organizationConfirmation.label
-                      : ""
-                  }
-                  onConfirmedWriteChange={markOrganizationWrite}
-                  unknownResult={unknownOrganizationFor === identity.userName}
-                  onUnknownResult={
-                    // 未決結果只對發出該操作的管理帳號顯示。
-                    () => setUnknownOrganizationFor(identity.userName)
-                  }
-                />
-              )}
-            </>
-          ) : null}
-          {identity.accountType === "business" &&
-          !identity.mustChangePassword ? (
-            // 所有業務帳號都使用同一組入口；一般查詢依當前權限回傳資料。
-            <>
-              <nav className="requisition-actions" aria-label="請購功能">
-                <button
-                  type="button"
-                  className="secondary"
-                  aria-pressed={businessPanel === "drafts"}
-                  disabled={pending}
-                  onClick={
-                    // 選擇草稿畫面，重按已選的面板保留原表單。
-                    () => switchBusinessPanel("drafts")
-                  }
-                >
-                  本人請購草稿
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  aria-pressed={businessPanel === "approvals"}
-                  disabled={pending}
-                  onClick={
-                    // 簽核畫面沿用業務面板的離開與未決結果保護。
-                    () => switchBusinessPanel("approvals")
-                  }
-                >
-                  請購查閱與簽核
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  aria-pressed={businessPanel === "reports"}
-                  disabled={pending}
-                  onClick={
-                    // 從草稿進入報表也須遵循相同的離開確認。
-                    () => switchBusinessPanel("reports")
-                  }
-                >
-                  請購統計與 CSV
-                </button>
-              </nav>
-              {businessPanel === "reports" ? (
-                <RequisitionReports
-                  key={identity.userName}
-                  getToken={getProtectedToken}
-                  pending={pending}
-                  beginOperation={beginOperation}
-                  finishOperation={finishOperation}
-                  onSessionInvalid={recoverProtectedSession}
-                />
-              ) : businessPanel === "approvals" && currentApproval ? (
-                <RequisitionApprovals
-                  key={identity.userName}
-                  getToken={getProtectedToken}
-                  pending={pending}
-                  beginOperation={beginOperation}
-                  finishOperation={finishOperation}
-                  onSessionInvalid={recoverProtectedSession}
-                  readbacks={currentApproval.readbacks}
-                  onReadbackChange={markApprovalWrite}
-                />
-              ) : (
-                <RequisitionDrafts
-                  key={identity.userName}
-                  getToken={getProtectedToken}
-                  pending={pending}
-                  beginOperation={beginOperation}
-                  finishOperation={finishOperation}
-                  onSessionInvalid={recoverDraftSession}
-                  onLeaveWarningChange={setDraftLeaveWarning}
-                  priorUnknown={unknownDraftFor === identity.userName}
-                  onUnknownReviewed={
-                    // 使用者已核對，目前帳號不再需要保留提示。
-                    () => setUnknownDraftFor(null)
-                  }
-                />
-              )}
-            </>
-          ) : null}
-        </>
-      ) : null}
-      <button
-        className="secondary"
-        type="button"
-        disabled={pending || phase === "loading"}
-        onClick={
-          // 此按鈕只重讀身分，保留任何尚未確認的寫入提示。
-          () => void refresh()
-        }
-      >
-        重新確認身分
-      </button>
-    </main>
+                  >
+                    有限改派
+                  </button>
+                </nav>
+                {!reassignmentActive && currentReassignment?.readback ? (
+                  <p role="status">「有限改派」有待讀取的結果。</p>
+                ) : null}
+                {reassignmentActive ? (
+                  <Reassignments
+                    key={identity.userName}
+                    getToken={getProtectedToken}
+                    pending={pending}
+                    beginOperation={beginOperation}
+                    finishOperation={finishOperation}
+                    onSessionInvalid={recoverProtectedSession}
+                    readback={currentReassignment.readback}
+                    onReadbackChange={markReassignmentWrite}
+                  />
+                ) : (
+                  <Organization
+                    key={identity.userName}
+                    getToken={getProtectedToken}
+                    pending={pending}
+                    beginOperation={beginOperation}
+                    finishOperation={finishOperation}
+                    onSessionInvalid={recoverProtectedSession}
+                    confirmedWrite={
+                      organizationConfirmation?.actor === identity.userName
+                        ? organizationConfirmation.label
+                        : ""
+                    }
+                    onConfirmedWriteChange={markOrganizationWrite}
+                    unknownResult={unknownOrganizationFor === identity.userName}
+                    onUnknownResult={
+                      // 未決結果只對發出該操作的管理帳號顯示。
+                      () => setUnknownOrganizationFor(identity.userName)
+                    }
+                  />
+                )}
+              </>
+            ) : null}
+            {identity.accountType === "business" &&
+            !identity.mustChangePassword ? (
+              // 所有業務帳號都使用同一組入口；一般查詢依當前權限回傳資料。
+              <>
+                <nav className="panel-nav" aria-label="請購功能">
+                  <button
+                    type="button"
+                    aria-pressed={businessPanel === "drafts"}
+                    disabled={pending}
+                    onClick={
+                      // 選擇草稿畫面，重按已選的面板保留原表單。
+                      () => switchBusinessPanel("drafts")
+                    }
+                  >
+                    本人請購草稿
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={businessPanel === "approvals"}
+                    disabled={pending}
+                    onClick={
+                      // 簽核畫面沿用業務面板的離開與未決結果保護。
+                      () => switchBusinessPanel("approvals")
+                    }
+                  >
+                    請購查閱與簽核
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={businessPanel === "reports"}
+                    disabled={pending}
+                    onClick={
+                      // 從草稿進入報表也須遵循相同的離開確認。
+                      () => switchBusinessPanel("reports")
+                    }
+                  >
+                    請購統計與 CSV
+                  </button>
+                </nav>
+                {businessPanel === "reports" ? (
+                  <RequisitionReports
+                    key={identity.userName}
+                    getToken={getProtectedToken}
+                    pending={pending}
+                    beginOperation={beginOperation}
+                    finishOperation={finishOperation}
+                    onSessionInvalid={recoverProtectedSession}
+                  />
+                ) : businessPanel === "approvals" && currentApproval ? (
+                  <RequisitionApprovals
+                    key={identity.userName}
+                    getToken={getProtectedToken}
+                    pending={pending}
+                    beginOperation={beginOperation}
+                    finishOperation={finishOperation}
+                    onSessionInvalid={recoverProtectedSession}
+                    readbacks={currentApproval.readbacks}
+                    onReadbackChange={markApprovalWrite}
+                  />
+                ) : (
+                  <RequisitionDrafts
+                    key={identity.userName}
+                    getToken={getProtectedToken}
+                    pending={pending}
+                    beginOperation={beginOperation}
+                    finishOperation={finishOperation}
+                    onSessionInvalid={recoverDraftSession}
+                    onLeaveWarningChange={setDraftLeaveWarning}
+                    priorUnknown={unknownDraftFor === identity.userName}
+                    onUnknownReviewed={
+                      // 使用者已核對，目前帳號不再需要保留提示。
+                      () => setUnknownDraftFor(null)
+                    }
+                  />
+                )}
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {refreshControl}
+      </main>
+    </>
   );
 }
 

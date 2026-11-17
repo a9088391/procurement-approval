@@ -1,4 +1,4 @@
-# 固定 SDK 與執行階段；backend-runtime 亦供尚未整合前端時獨立驗證 API。
+# 固定 SDK 與執行階段版本。backend-runtime 供隔離的 API 負載測試使用。
 FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS backend-build
 WORKDIR /src
 COPY global.json ./

@@ -1,59 +1,368 @@
-/* 簡單單欄讓表單在手機可讀，保留鍵盤焦點與長帳號換行。 */
+/* 中性色供表單及資料閱讀使用，磚紅標示動作，狀態同時保留文字。 */
 :root {
-  font-family: system-ui, sans-serif;
-  color: #17243a;
-  background: #f5f7fa;
-  line-height: 1.6;
+  font-family: Inter, "Noto Sans TC", "PingFang TC", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  color: #282a25;
+  background: #f5f4ef;
+  --white: #fff;
+  --line: #d6d4ca;
+  --soft-line: #e3e1d8;
+  --muted: #5b5e55;
+  --brick: #8e452d;
+  --green: #3e624c;
+  --amber: #795017;
+  --table-heading: #efeee8;
 }
 
 * {
   box-sizing: border-box;
 }
 
-body {
+body,
+h1,
+h2,
+dl {
   margin: 0;
 }
 
-/* 頁面寬度與間距集中於外層，維持單欄閱讀順序。 */
-main {
-  max-width: 40rem;
-  margin: 3rem auto;
-  padding: 0 1.25rem 2rem;
+.frame {
+  max-width: 1180px;
+  margin-inline: auto;
+  padding-inline: 28px;
 }
 
-header {
-  margin-bottom: 1.5rem;
+.masthead {
+  background: var(--white);
+  border-bottom: 1px solid var(--line);
 }
 
-h1 {
+.masthead-anonymous {
+  background: #292b26;
+  border-color: #292b26;
+  color: var(--white);
+}
+
+.masthead-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 24px;
+  min-height: 60px;
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 720;
+}
+
+.wordmark svg {
+  width: 22px;
+  height: 25px;
+  color: var(--brick);
+}
+
+.masthead-anonymous .wordmark svg {
+  color: inherit;
+}
+
+.account,
+.account-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 13px;
+}
+
+.account-identity {
+  color: var(--muted);
+  gap: 0 7px;
+  overflow-wrap: anywhere;
+}
+
+.account-identity dd {
   margin: 0;
-  font-size: 2rem;
+}
+
+.account-roles {
+  order: -1;
+}
+
+.account-roles:not(:empty)::after {
+  content: " ·";
+  margin-inline-start: 4px;
+}
+
+.account .account-logout {
+  border-inline-start: 1px solid var(--line);
+  padding-inline-start: 15px;
+}
+
+.workspace {
+  padding-bottom: 30px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.auth-card,
+.password-panel {
+  width: min(100% - 32px, 438px);
+  padding: 20px 25px 23px;
+  margin: clamp(40px, 12vh, 110px) auto 36px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--white);
+}
+
+.password-panel {
+  margin: 24px auto;
+  width: min(100%, 438px);
+}
+
+.auth-card h2,
+.password-panel h2 {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.auth-card form button,
+.password-panel form button {
+  width: 100%;
+  min-height: 43px;
+  font-weight: 650;
+}
+
+.auth-card .identity-refresh {
+  display: block;
+  margin: 12px auto 0;
+}
+
+.workspace .identity-refresh {
+  margin-top: 22px;
 }
 
 h2 {
-  margin-top: 0;
-  font-size: 1.25rem;
+  font-size: 28px;
+  line-height: 1.25;
+}
+
+h3 {
+  font-size: 17px;
+  line-height: 1.4;
 }
 
 p {
   margin: 0.6rem 0;
+  overflow-wrap: anywhere;
 }
 
-.eyebrow,
-.hint {
-  color: #526075;
-  font-size: 0.9rem;
+.hint,
+.identity-refresh {
+  color: var(--muted);
+  font-size: 13px;
 }
 
-section {
-  background: white;
-  border: 1px solid #d6dce5;
-  border-radius: 0.5rem;
-  margin: 1rem 0;
-  padding: 1.5rem;
+/* 其餘功能沿用表單結構及操作順序，共用版頭與控制項。 */
+.organization,
+.requisition-drafts,
+.requisition-reports,
+.reassignments {
+  margin-block: 24px 0;
+  padding: clamp(16px, 2.5vw, 28px);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--white);
+  overflow-wrap: anywhere;
 }
 
-/* min-width 允許表單在窄螢幕縮小，不讓輸入框撐出容器。 */
+.organization select,
+.reassignments select,
+.requisition-reports select {
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+/* 子選單及編輯區留在同一張版面；窄螢幕只捲動需要更多寬度的清單。 */
+.organization-layout {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: 18px 24px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.organization-menu {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  gap: 6px;
+}
+
+.organization-menu button {
+  min-height: 44px;
+  margin: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  text-align: start;
+}
+
+.organization-menu button[aria-pressed="true"],
+.organization-menu button:not(:disabled):hover {
+  border-color: #dac4b8;
+  background: #f1e7df;
+  color: var(--brick);
+}
+
+.organization-menu button[aria-pressed="true"] {
+  font-weight: 700;
+}
+
+.organization-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.organization-list-actions,
+.organization-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.organization-list-actions {
+  flex-wrap: wrap;
+}
+
+.organization-page-heading h3,
+.organization-page-heading button,
+.organization-table button {
+  margin: 0;
+}
+
+.organization-editor {
+  max-width: 40rem;
+  margin-bottom: 16px;
+  padding: clamp(12px, 2vw, 20px);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+/* 保存與取消保持同列；必要時換行，兩個觸控目標仍至少 44px 高。 */
+.organization-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.organization-form-actions button {
+  min-height: 44px;
+  margin: 0;
+}
+
+.organization-accounts {
+  min-width: 29rem;
+}
+
+.organization-table th,
+.organization-table td {
+  padding: 10px 12px;
+}
+
+.organization-table th[scope="row"] {
+  font-size: inherit;
+}
+
+.organization-table tr:last-child th[scope="row"] {
+  border-bottom: 0;
+}
+
+.organization-table :is(th, td):first-child {
+  width: 1%;
+}
+
+.organization-table input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--brick);
+  vertical-align: middle;
+}
+
+.organization-table :is(th, td):last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.organization-table button {
+  min-height: 36px;
+  padding: 3px 10px;
+}
+
+/* 仍使用原生選單，留出箭頭空間並讓高對比模式採用系統樣式。 */
+.organization select {
+  appearance: none;
+  padding-inline: 11px 35px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    right 18px center,
+    right 13px center;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.organization select:enabled {
+  cursor: pointer;
+}
+
+.organization select:focus-visible {
+  border-color: var(--brick);
+}
+
+@media (forced-colors: active) {
+  .organization select {
+    appearance: auto;
+    padding-inline: 9px;
+    background-image: none;
+  }
+}
+
+/* 密碼重設收在獨立區塊，保留表單各自的送出與鍵盤操作。 */
+.organization-password-reset {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.organization-password-reset summary {
+  color: var(--brick);
+  cursor: pointer;
+  font-weight: 650;
+}
+
 fieldset {
   border: 0;
   margin: 0;
@@ -63,8 +372,8 @@ fieldset {
 
 label {
   display: block;
-  font-weight: 600;
-  margin-top: 1rem;
+  font-weight: 650;
+  margin: 16px 0 6px;
 }
 
 input,
@@ -72,9 +381,12 @@ select,
 textarea {
   width: 100%;
   min-width: 0;
-  padding: 0.65rem;
-  border: 1px solid #7a879b;
-  border-radius: 0.25rem;
+  min-height: 39px;
+  padding: 7px 9px;
+  border: 1px solid #99998e;
+  border-radius: 4px;
+  background: var(--white);
+  color: inherit;
   font: inherit;
 }
 
@@ -83,14 +395,14 @@ textarea {
 }
 
 button {
+  padding: 8px 13px;
+  margin-top: 16px;
+  border: 1px solid var(--brick);
+  border-radius: 5px;
+  background: var(--brick);
+  color: var(--white);
   font: inherit;
-  padding: 0.6rem 1rem;
-  background: #244c82;
-  color: white;
-  border: 1px solid #244c82;
-  border-radius: 0.25rem;
   cursor: pointer;
-  margin-top: 1rem;
 }
 
 button:disabled {
@@ -98,108 +410,566 @@ button:disabled {
   cursor: wait;
 }
 
-/* 鍵盤導覽保留清楚焦點，不只依賴滑鼠或顏色辨識操作位置。 */
 :focus-visible {
-  outline: 3px solid #b35800;
+  outline: 2px solid var(--brick);
   outline-offset: 3px;
 }
 
-.secondary {
-  background: white;
-  color: #244c82;
+.masthead-anonymous :focus-visible {
+  outline-color: var(--white);
 }
 
-/* 錯誤與長帳號可斷行，避免敏感操作的提示或控制項被水平裁切。 */
+.secondary {
+  background: transparent;
+  border-color: #a47a69;
+  color: var(--brick);
+}
+
+.secondary:not(:disabled):hover {
+  background: #f1e7df;
+}
+
+.text-control {
+  padding: 4px 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.text-control:not(:disabled):hover {
+  color: var(--brick);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .feedback {
-  padding: 1rem;
-  background: #e8f4ed;
-  border-left: 4px solid #287747;
-  overflow-wrap: anywhere;
+  padding: 10px 14px;
+  background: #e9f1e9;
+  border-left: 4px solid var(--green);
 }
 
 .error {
-  background: #fff1ed;
-  border-color: #b33b25;
-}
-
-dl {
-  margin: 0;
+  background: #fff0e9;
+  border-color: var(--brick);
 }
 
 dt {
-  color: #526075;
+  color: var(--muted);
 }
 
 dd {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.65rem;
   overflow-wrap: anywhere;
-}
-
-/* 管理摘要讓長名稱換行，原生選單則維持在窄螢幕的表單寬度內。 */
-.organization {
-  margin-top: 2rem;
-  overflow-wrap: anywhere;
-}
-
-.organization h3 {
-  margin-top: 0;
-}
-
-.organization select {
-  max-width: 100%;
-  background: white;
-  color: inherit;
-  text-overflow: ellipsis;
-}
-
-.organization form + form {
-  margin-top: 1.5rem;
-}
-
-/* 請購面板維持單欄，長主旨和單號可換行，操作按鈕於窄畫面自動換列。 */
-.requisition-drafts,
-.requisition-approvals,
-.requisition-reports,
-.reassignments {
-  overflow-wrap: anywhere;
-}
-
-.reassignments select,
-.requisition-reports select {
-  text-overflow: ellipsis;
 }
 
 .draft-actions,
 .requisition-actions {
   display: flex;
   flex-wrap: wrap;
-  column-gap: 0.75rem;
+  column-gap: 12px;
 }
 
-/* 面板切換保留按鈕語意；已選取的面板也有可見樣式。 */
-.requisition-actions button[aria-pressed="true"] {
-  background: #244c82;
-  color: white;
+.report-filter-grid,
+.approval-filter-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.report-filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.approval-filter-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.report-filter-field,
+.approval-filter-field {
+  min-width: 0;
+}
+
+.report-filter-field label,
+.approval-filter-field label {
+  margin: 0 0 6px;
+}
+
+.report-filter-grid .requisition-actions,
+.approval-filter-grid .requisition-actions {
+  grid-column: 1 / -1;
+}
+
+.draft-line {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
 }
 
 .requisition-purpose {
   white-space: pre-wrap;
 }
 
-.draft-line {
-  margin-top: 1rem;
-  padding: 0.75rem;
-  border: 1px solid #d6dce5;
-  border-radius: 0.25rem;
+.panel-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 23px;
+  border-bottom: 1px solid var(--line);
 }
 
-/* 手機只收緊留白，維持相同表單順序與控制項。 */
-@media (max-width: 480px) {
-  main {
-    margin-top: 1.5rem;
+.panel-nav button {
+  min-height: 52px;
+  margin: 0;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  padding: 3px 13px 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: start;
+}
+
+.panel-nav button[aria-pressed="true"] {
+  border-bottom-color: var(--brick);
+  color: var(--brick);
+  font-weight: 700;
+}
+
+/* 欄寬依內容分配，讓不可斷行的金額留在自己的儲存格；窄畫面可用鍵盤聚焦外框並橫向捲動。 */
+.requisition-approvals {
+  overflow-wrap: anywhere;
+}
+
+.page-heading,
+.detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.page-heading {
+  margin: 34px 0 21px;
+}
+
+.page-heading button {
+  font-size: 13px;
+  margin: 0;
+}
+
+.page-heading h2,
+.detail-heading h2 {
+  font-size: clamp(25px, 4vw, 33px);
+}
+
+.table-frame {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--white);
+}
+
+.report-table {
+  min-width: 1040px;
+  table-layout: fixed;
+}
+
+.report-table th,
+.report-table td {
+  padding: 10px 12px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.report-table th:first-child {
+  width: 16%;
+}
+
+.report-table th:nth-child(2) {
+  width: 17%;
+}
+
+.report-table th:nth-child(3) {
+  width: 13%;
+}
+
+.report-table th:nth-child(4) {
+  width: 13%;
+}
+
+.report-table th:nth-child(5) {
+  width: 12%;
+}
+
+.report-table th:nth-child(6) {
+  width: 15%;
+}
+
+.report-table th:last-child {
+  width: 14%;
+}
+
+.report-table tbody td:first-child {
+  word-break: break-all;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 14px;
+}
+
+thead {
+  background: var(--table-heading);
+}
+
+th,
+td {
+  padding: 14px 17px;
+  border-bottom: 1px solid var(--soft-line);
+}
+
+th {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.approval-table {
+  min-width: 560px;
+}
+
+.approval-table th:first-child {
+  width: 43%;
+}
+
+.approval-table th:last-child {
+  width: 24%;
+}
+
+.approval-table tr:hover {
+  background: #faf9f6;
+}
+
+.approval-table .approval-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.subject,
+.identifier,
+.status-note {
+  display: block;
+}
+
+.subject {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.identifier {
+  margin-top: 4px;
+  color: var(--muted);
+  font:
+    12px/1.5 "SFMono-Regular",
+    Consolas,
+    monospace;
+}
+
+.requisition-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.requisition-status::before {
+  content: "";
+  align-self: center;
+  flex: 0 0 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-approved {
+  color: var(--green);
+}
+
+.status-manager_pending,
+.status-finance_pending {
+  color: var(--amber);
+}
+
+.status-rejected,
+.status-withdrawn {
+  color: var(--brick);
+}
+
+.status-note {
+  margin: 2px 0 0 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.money {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.row-chevron {
+  margin-left: clamp(4px, 1.7vw, 24px);
+  font-size: 20px;
+  line-height: 0;
+}
+
+.detail-back {
+  margin: 14px 0 16px;
+  color: var(--brick);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.detail-heading {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-heading .identifier {
+  margin-bottom: 0;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(255px, 1fr);
+  gap: 27px;
+  margin-top: 21px;
+}
+
+.detail-grid h3 {
+  margin: 20px 0 10px;
+  color: var(--brick);
+}
+
+.detail-grid h3:first-child {
+  margin-top: 0;
+}
+
+.document-fields {
+  border-block: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.document-fields > div {
+  display: grid;
+  grid-template-columns: minmax(105px, 25%) minmax(0, 1fr);
+}
+
+.document-fields > div + div {
+  border-top: 1px solid var(--soft-line);
+}
+
+.document-fields dt,
+.document-fields dd {
+  margin: 0;
+  padding: 5px 12px;
+}
+
+.document-fields dt {
+  background: var(--table-heading);
+  color: inherit;
+  font-weight: 650;
+}
+
+.document-fields dd {
+  background: var(--white);
+}
+
+.line-table {
+  min-width: 460px;
+}
+
+.line-table th,
+.line-table td {
+  padding: 8px 12px;
+}
+
+.line-table th:first-child {
+  width: 23%;
+}
+
+.line-table th:nth-child(2),
+.line-table th:nth-child(3) {
+  width: 13%;
+}
+
+.line-table .quantity {
+  text-align: center;
+}
+
+.document-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-block: 1px solid var(--line);
+  background: var(--white);
+  color: var(--brick);
+  font-weight: 700;
+}
+
+.document-total dt {
+  color: inherit;
+  font-size: 13px;
+}
+
+.document-total dd {
+  margin: 0;
+  font-size: 18px;
+}
+
+.detail-grid details {
+  margin-block: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.detail-grid summary {
+  cursor: pointer;
+  color: var(--brick);
+}
+
+.detail-grid details[open] .document-fields {
+  margin-top: 10px;
+}
+
+.detail-history {
+  padding-left: 24px;
+  border-left: 1px solid var(--line);
+}
+
+.timeline {
+  list-style: none;
+  padding: 0;
+  margin: 15px 0 0;
+}
+
+.timeline li {
+  position: relative;
+  padding: 0 0 22px 23px;
+}
+
+.timeline li::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.timeline li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 15px;
+  bottom: -6px;
+  left: 4px;
+  width: 1px;
+  background: #bfc8ba;
+}
+
+.timeline p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.timeline dl {
+  margin-top: 7px;
+  font-size: 13px;
+}
+
+@media (max-width: 740px) {
+  .frame {
+    padding-inline: 16px;
   }
 
-  section {
-    padding: 1rem;
+  .masthead-inner {
+    padding-block: 10px;
+  }
+
+  .panel-nav {
+    gap: 0 5px;
+  }
+
+  .panel-nav button {
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+
+  .organization-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .report-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .organization-menu {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .organization-menu button {
+    padding-inline: 10px;
+  }
+
+  .organization-table th,
+  .organization-table td {
+    padding-inline: 8px;
+  }
+
+  .page-heading {
+    margin-top: 22px;
+  }
+
+  .approval-table th,
+  .approval-table td {
+    padding-inline: 10px;
+  }
+
+  .detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .detail-history {
+    padding: 16px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 360px) {
+  .report-filter-grid,
+  .approval-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

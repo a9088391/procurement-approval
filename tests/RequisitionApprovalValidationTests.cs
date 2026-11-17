@@ -289,7 +289,8 @@ public sealed class RequisitionApprovalValidationTests
         Assert.True(JsonElement.DeepEquals(prior.GetProperty("history"), result.GetProperty("history")));
         Assert.True(JsonElement.DeepEquals(prior.GetProperty("round"), result.GetProperty("round")));
         var list = await owner.GetFromJsonAsync<JsonElement>(RequisitionsPath);
-        Assert.True(Assert.Single(list.EnumerateArray()).GetProperty("paused").GetBoolean());
+        var listedRequisition = Assert.Single(list.EnumerateArray());
+        Assert.True(listedRequisition.GetProperty("paused").GetBoolean());
     }
 
     // 主管已決定後才失格，既有決定保留，財務關不受已完成資格影響。

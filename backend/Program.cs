@@ -200,7 +200,9 @@ app.Use(async (http, next) =>
         && http.Request.Headers.ContainsKey(AuthEndpoints.CsrfHeaderName);
 
     // 所有 API POST 都要求權杖，直接使用 Cookie 的受配對保護 GET 可省略標頭。
-    if ((api && post) || pairedRead)
+    if ((api
+            && post)
+        || pairedRead)
     {
         try
         {

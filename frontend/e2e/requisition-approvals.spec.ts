@@ -226,7 +226,10 @@ async function login(page: Page, role: Role | "admin") {
 
 // 每次附上本案例自己的版本標記，不依賴既有清單件數。
 function rowFor(region: Locator, subject: string) {
-  return region.getByRole("listitem").filter({ hasText: subject });
+  return region
+    .getByRole("row")
+    .or(region.getByRole("listitem"))
+    .filter({ hasText: subject });
 }
 
 // 從業務面板進入查閱並等待清單 GET；當前面板切換完成後才使用資料。
@@ -245,12 +248,13 @@ async function approvals(page: Page) {
 async function openApproval(region: Locator, subject: string) {
   const row = rowFor(region, subject);
   await expect(row).toHaveCount(1);
-  const numberButton = row.getByRole("button");
-  const number = await numberButton.innerText();
-  await numberButton.click();
+  const openButton = row.getByRole("button");
+  const number = await openButton.getByText(/^PR-/).innerText();
+  await openButton.click();
   await expect(
-    region.getByRole("heading", { name: `請購明細 ${number}`, exact: true }),
+    region.getByRole("heading", { name: subject, exact: true }),
   ).toBeFocused();
+  await expect(region.getByText(number, { exact: true }).first()).toBeVisible();
 }
 
 // 透過本人草稿表單建立完全符合送審規則的已保存內容。
@@ -282,7 +286,11 @@ async function saveThroughUI(page: Page, subject: string, itemName: string) {
 }
 
 // 恢復類案例先透過真實 API 建立已送審的單，將瀏覽器動作集中於被測的關卡。
-async function seedPending(request: APIRequestContext, subject: string) {
+async function seedPending(
+  request: APIRequestContext,
+  subject: string,
+  { quantity, unitPrice } = { quantity: 1, unitPrice: 3 },
+) {
   // 用申請人的已配對權杖保存合格草稿，只送回保存所回傳的版本。
   const headers = { "X-CSRF-TOKEN": await csrf(request) };
   const draft = await request.post("/api/requisitions/drafts", {
@@ -290,7 +298,7 @@ async function seedPending(request: APIRequestContext, subject: string) {
     data: {
       subject,
       purpose: "驗證操作讀回",
-      lines: [{ itemName: "測試品項", unit: "件", quantity: 1, unitPrice: 3 }],
+      lines: [{ itemName: "測試品項", unit: "件", quantity, unitPrice }],
     },
   });
   expect(draft.status()).toBe(201);
@@ -331,20 +339,56 @@ async function checkLayout(
     const controls = await region
       .getByRole("button")
       .or(region.getByRole("combobox"))
+      .or(region.getByRole("searchbox"))
       .or(region.getByRole("textbox"))
       .or(region.locator('input[type="date"]'))
       .all();
     for (const control of controls) {
       // 確認每個互動控制項都在有效的水平範圍內。
       const box = await control.boundingBox();
-      expect(box !== null && box.x >= 0 && box.x + box.width <= width).toBe(
-        true,
-      );
+      const meetsLeftBoundary = box !== null && box.x >= 0;
+      expect(meetsLeftBoundary && box.x + box.width <= width).toBe(true);
     }
 
     // 僅在本機證據路徑已掛載時截圖，畫面只含合成資料與唯讀操作。
     if (capture && process.env.APPROVAL_EVIDENCE === "1") {
       await region.screenshot({ path: `/evidence/${capture}-${width}.png` });
+    }
+  }
+}
+
+// 量測完整金額的文字邊界，避免表格可以捲動卻仍蓋住相鄰欄位。
+async function checkMoneyFits(page: Page, cells: [Locator, string][]) {
+  for (const width of [1280, 390]) {
+    // 切到實際桌機及手機寬度，確認只由表格容器承擔水平捲動。
+    await page.setViewportSize({ width, height: 900 });
+    expect(
+      await page.evaluate(
+        // 一併驗證 viewport 和頁面內容寬度，避免外層也出現水平溢位。
+        () => [innerWidth, document.documentElement.scrollWidth],
+      ),
+    ).toEqual([width, width]);
+
+    // 先確認金額正確，再比對整格內容的文字邊界，包含列表的箭頭。
+    for (const [cell, amount] of cells) {
+      await expect(cell).toContainText(amount);
+      const { textLeft, textRight, cellLeft, cellRight } = await cell.evaluate(
+        // Range 取得文字和行內箭頭的實際位置，元素寬度無法檢出此類重疊。
+        (element) => {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          const text = range.getBoundingClientRect();
+          const bounds = element.getBoundingClientRect();
+          return {
+            textLeft: text.left,
+            textRight: text.right,
+            cellLeft: bounds.left,
+            cellRight: bounds.right,
+          };
+        },
+      );
+      expect(textLeft).toBeGreaterThanOrEqual(cellLeft);
+      expect(textRight).toBeLessThanOrEqual(cellRight);
     }
   }
 }
@@ -355,9 +399,11 @@ async function history(region: Locator, events: string[]) {
   const items = list.getByRole("listitem");
   await expect(items).toHaveCount(events.length);
   for (const [index, event] of events.entries()) {
-    // 核對歷程順序、關卡、操作者和實際寫入的時間。
+    // 同一事件的關卡、操作者、輪次分行顯示；仍核對事件順序及實際寫入的時間。
     const item = items.nth(index);
-    await expect(item).toContainText(event);
+    for (const field of event.split(" · ")) {
+      await expect(item).toContainText(field);
+    }
     await expect(item.locator("time")).toHaveAttribute("datetime", /T/);
   }
 }
@@ -507,13 +553,22 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
     const apply = filters.getByRole("button", { name: "套用條件" });
     const clear = filters.getByRole("button", { name: "清除條件" });
     const exportCsv = report.getByRole("button", { name: "下載 CSV" });
-    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    const rows = report.getByRole("table", { name: "符合條件的請購" });
     const groups = report.getByRole("list", {
       name: "依送審部門與目前狀態統計",
     });
     const department = filters.getByLabel("送審部門");
     await expect(exportCsv).toBeEnabled();
-    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await expect(rows.locator("tbody tr")).toHaveCount(3);
+    await expect(rows.getByRole("columnheader")).toHaveText([
+      "單號",
+      "主旨",
+      "申請人",
+      "送審部門",
+      "目前狀態",
+      "預估金額",
+      "最近送審時間",
+    ]);
     await expect(rowFor(rows, pendingSubject)).toContainText(waiting.number);
     await expect(rows).not.toContainText(draftSubject);
     await expect(department.locator("option")).toHaveCount(3);
@@ -577,7 +632,7 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
         appliedQuery,
       );
     }
-    await expect(rows.getByRole("listitem")).toHaveCount(1);
+    await expect(rows.locator("tbody tr")).toHaveCount(1);
     await expect(rowFor(rows, subject)).toContainText(submitted.number);
     await expect(groups.getByRole("listitem")).toHaveCount(1);
     await expect(groups).toContainText(departmentName);
@@ -608,7 +663,9 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
     if (!downloadPath) throw new Error("瀏覽器未保存報表 CSV。");
     const bytes = readFileSync(downloadPath);
     expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0xef, 0xbb, 0xbf]));
-    expect(bytes.subarray(3).toString("utf8").split("\r\n")).toEqual([
+    // 跳過已驗證的 BOM，再逐列核對 CSV 的內容及結尾。
+    const csvText = bytes.subarray(3).toString("utf8");
+    expect(csvText.split("\r\n")).toEqual([
       "單號,主旨,申請人顯示名稱,送審部門,目前狀態,TWD 預估金額,最近送審時間",
       expect.stringMatching(
         new RegExp(
@@ -620,6 +677,24 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
     // 瀏覽器開始下載後，等相同條件的清單及統計重新讀取完成再檢查版面。
     await expect(exportCsv).toBeEnabled();
     await checkLayout(page, report, subject, "ticket07-report");
+    // 兩種 viewport 都保持搜尋條件、請購表格、分組統計的閱讀順序。
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const [filtersBox, rowsBox, groupsHeadingBox] = await Promise.all([
+        filters.boundingBox(),
+        rows.boundingBox(),
+        report
+          .getByRole("heading", { name: "依送審部門與目前狀態統計" })
+          .boundingBox(),
+      ]);
+      expect(
+        filtersBox !== null &&
+          rowsBox !== null &&
+          groupsHeadingBox !== null &&
+          filtersBox.y + filtersBox.height <= rowsBox.y &&
+          rowsBox.y + rowsBox.height <= groupsHeadingBox.y,
+      ).toBe(true);
+    }
 
     // 驗證倒置日期與不符日期；清除後恢復可見資料，傳輸失敗時須移除舊結果並允許重讀。
     const from = filters.getByLabel("起日（臺灣時間）");
@@ -633,7 +708,7 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
     await expect(report.getByText("沒有符合條件的請購。")).toBeVisible();
     await expect(report.getByText("沒有符合條件的統計。")).toBeVisible();
     await clear.click();
-    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await expect(rows.locator("tbody tr")).toHaveCount(3);
     await page.route(
       "**/api/requisitions/statistics?*",
       // 刻意中斷一次網路傳輸；重讀時由真實 API 回傳。
@@ -646,7 +721,7 @@ test("請購統計與 CSV 依同條件查詢與下載，換帳號後卸載舊資
     await expect(groups).toHaveCount(0);
     await expect(exportCsv).toBeDisabled();
     await apply.click();
-    await expect(rows.getByRole("listitem")).toHaveCount(3);
+    await expect(rows.locator("tbody tr")).toHaveCount(3);
     await expect(exportCsv).toBeEnabled();
 
     // 由同一瀏覽器另一分頁改用財務帳號；舊分頁權杖與新 Cookie 不配對。
@@ -732,7 +807,7 @@ test("請購統計與 CSV 撤掉主管角色後重新套用與下載都移除舊
     const option = department.locator(`option[value="${id}"]`);
     const apply = report.getByRole("button", { name: "套用條件" });
     const downloadCsv = report.getByRole("button", { name: "下載 CSV" });
-    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    const rows = report.getByRole("table", { name: "符合條件的請購" });
     const groups = report.getByRole("list", {
       name: "依送審部門與目前狀態統計",
     });
@@ -880,7 +955,7 @@ test("請購統計與 CSV 先發生網路錯誤仍處理較晚的防偽拒絕", 
     });
     await entry.click();
     const report = page.getByRole("region", { name: "請購統計與 CSV" });
-    const rows = report.getByRole("list", { name: "符合條件的請購" });
+    const rows = report.getByRole("table", { name: "符合條件的請購" });
     await expect(rowFor(rows, subject)).toContainText(submitted.number);
 
     // 另一分頁實際更換共享 Cookie；第一分頁仍持有原身分的權杖。
@@ -945,6 +1020,208 @@ test("請購統計與 CSV 先發生網路錯誤仍處理較晚的防偽拒絕", 
     // 結束獨立的資料準備工作階段。
     await applicant.dispose();
   }
+});
+
+// 從真實授權結果篩選草稿及已送審請購，並驗證明細載入期間和返回清單的狀態。
+test("請購列表套用主旨或單號與狀態，獨立開啟明細後保留條件", async ({
+  page,
+}) => {
+  // 建立同一關鍵字下的兩種狀態，另保存一筆非命中項目。
+  await login(page, "applicant");
+  const keyword = `FILTER-${runId}`;
+  const pendingSubject = `${keyword} 主管`;
+  const pending = await seedPending(page.request, pendingSubject);
+  const draftSubject = `${keyword} 草稿`;
+  const otherSubject = `其他請購-${runId}`;
+  await seedPending(page.request, otherSubject);
+  await saveThroughUI(page, draftSubject, "測試草稿");
+  const region = await approvals(page);
+  const list = region.getByRole("region", { name: "請購列表" });
+  const form = region.getByRole("form", { name: "請購搜尋條件" });
+  const search = form.getByLabel("主旨或單號", { exact: true });
+  const status = form.getByLabel("目前狀態", { exact: true });
+  const apply = form.getByRole("button", { name: "套用條件", exact: true });
+  const reload = region.getByRole("button", { name: "重新讀取請購列表" });
+  const back = region.getByRole("button", { name: "返回請購列表" });
+  const listHeading = region.getByRole("heading", {
+    name: "請購查閱與簽核",
+    exact: true,
+  });
+  const detailHeading = region.getByRole("heading", {
+    name: pendingSubject,
+    exact: true,
+  });
+  const detailUrl = `${baseURL}/api/requisitions/${pending.id}`;
+  const openRow = rowFor(list, pending.number).getByRole("button");
+
+  // 用真實清單 GET 的完整網址核對每次重新讀取未傳入報表條件。
+  async function refreshFrom(button: Locator) {
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        // 只比對無參數的清單 GET。
+        (response) =>
+          response.url() === `${baseURL}/api/requisitions` &&
+          response.request().method() === "GET",
+      ),
+      button.click(),
+    ]);
+    expect(response.status()).toBe(200);
+  }
+
+  // 以不同大小寫與前後空白查主旨。編輯狀態不會立即影響結果。
+  await expect(rowFor(list, draftSubject)).toHaveCount(1);
+  await expect(rowFor(list, pending.number)).toHaveCount(1);
+  await expect(rowFor(list, otherSubject)).toHaveCount(1);
+  await expect(status.locator("option")).toHaveText([
+    "全部狀態",
+    "草稿",
+    "撤回修改中",
+    "主管待審",
+    "財務待審",
+    "核准結案",
+    "駁回結案",
+  ]);
+  await search.fill(` ${keyword.toLowerCase()} `);
+  await refreshFrom(apply);
+  await expect(list.getByRole("button")).toHaveCount(2);
+  await expect(rowFor(list, draftSubject)).toHaveCount(1);
+  await expect(rowFor(list, pending.number)).toHaveCount(1);
+  await status.selectOption("draft");
+  const unapplied = region.getByText("條件尚未套用，以下仍為上次結果。");
+  await expect(unapplied).toBeVisible();
+  await expect(list.getByRole("button")).toHaveCount(2);
+  await refreshFrom(apply);
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(rowFor(list, draftSubject)).toHaveCount(1);
+  await expect(unapplied).toHaveCount(0);
+
+  // 同時比對單號和狀態。狀態不符時顯示無符合結果。
+  await search.fill(pending.number.toLowerCase());
+  await refreshFrom(apply);
+  await expect(region.getByText("沒有符合搜尋條件的請購。")).toBeVisible();
+  await expect(list).toHaveCount(0);
+  await status.selectOption("manager_pending");
+  await refreshFrom(apply);
+  await expect(list.getByRole("button")).toHaveCount(1);
+
+  // 暫停實際明細 GET，確認尚未收到回應時清單與表單已卸載。
+  let release!: () => void;
+  // 保留放行方法，測試不靠固定延遲猜測畫面和網路的先後。
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    detailUrl,
+    // 保留真實回應。檢查載入畫面後再放行明細請求。
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  try {
+    await openRow.click();
+    await expect(region.getByText("正在讀取請購明細…")).toBeVisible();
+    await expect(list).toHaveCount(0);
+    await expect(form).toHaveCount(0);
+    await expect(reload).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await expect(detailHeading).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await expect(form).toHaveCount(0);
+
+  // 返回清單重新讀取授權結果，沿用先前的條件。
+  await refreshFrom(back);
+  await expect(listHeading).toBeFocused();
+  await expect(search).toHaveValue(pending.number.toLowerCase());
+  await expect(status).toHaveValue("manager_pending");
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(rowFor(list, pending.number)).toHaveCount(1);
+
+  // 模擬第一次開啟時傳輸中斷。清單與篩選恢復，並可重讀同筆明細。
+  const retry = region.getByRole("button", {
+    name: "重新讀取結果",
+    exact: true,
+  });
+  await page.route(
+    detailUrl,
+    // 只中斷第一次明細查詢，人工重讀仍走真實 API。
+    (route) => route.abort("failed"),
+    { times: 1 },
+  );
+  await openRow.click();
+  await expect(region.getByRole("alert")).toHaveText(
+    "無法讀取請購結果，請重新讀取。",
+  );
+  await expect(listHeading).toBeFocused();
+  await expect(openRow).toBeEnabled();
+  await expect(search).toHaveValue(pending.number.toLowerCase());
+  await expect(status).toHaveValue("manager_pending");
+  await expect(back).toHaveCount(0);
+  const [retried] = await Promise.all([
+    page.waitForResponse(
+      // 重讀必須是同一筆的 GET。
+      (response) =>
+        response.url() === detailUrl && response.request().method() === "GET",
+    ),
+    retry.click(),
+  ]);
+  expect(retried.status()).toBe(200);
+  await expect(detailHeading).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await expect(form).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
+  await refreshFrom(back);
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(search).toHaveValue(pending.number.toLowerCase());
+  await expect(status).toHaveValue("manager_pending");
+
+  // 只模擬第一次明細 GET 查無。清掉舊清單，保留條件供手動重新讀取。
+  let writes = 0;
+  page.on("request", (request) => {
+    // 觀察 404 與手動重讀是否意外發出請購寫入。
+    if (
+      request.method() === "POST" &&
+      request.url().startsWith(`${baseURL}/api/requisitions/`)
+    )
+      writes++;
+  });
+  await page.route(
+    detailUrl,
+    // 回傳正式錯誤格式，讓 UI 辨識通用的不存在或不可見。
+    (route) =>
+      route.fulfill({
+        status: 404,
+        json: { code: "not_found", message: "找不到指定的請購單。" },
+      }),
+    { times: 1 },
+  );
+  await openRow.click();
+  await expect(region.getByRole("alert")).toHaveText(
+    "找不到指定的請購單，請重新讀取請購列表。",
+  );
+  await expect(listHeading).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await expect(back).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
+  await expect(search).toHaveValue(pending.number.toLowerCase());
+  await expect(status).toHaveValue("manager_pending");
+  await refreshFrom(reload);
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(rowFor(list, pending.number)).toHaveCount(1);
+  expect(writes).toBe(0);
+
+  // 清除條件後重新讀取完整的授權清單。
+  await refreshFrom(
+    form.getByRole("button", { name: "清除條件", exact: true }),
+  );
+  await expect(search).toHaveValue("");
+  await expect(status).toHaveValue("");
+  await expect(rowFor(list, draftSubject)).toHaveCount(1);
+  await expect(rowFor(list, pending.number)).toHaveCount(1);
+  await expect(rowFor(list, otherSubject)).toHaveCount(1);
 });
 
 // 驗證兩種結案與角色操作，也檢查瀏覽器保留管理 API 接受的原始部門名稱。
@@ -1022,7 +1299,20 @@ test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照
   await page.keyboard.press("Tab");
   await expect(reloadList).toBeFocused();
   await checkLayout(page, applicant, subject);
+  await expect(applicant.getByRole("columnheader")).toHaveText([
+    "主旨 / 單號",
+    "申請人",
+    "目前狀態",
+    "預估申請金額",
+  ]);
   await openApproval(applicant, subject);
+  await expect(applicant.getByRole("columnheader")).toHaveText([
+    "品名",
+    "單位",
+    "數量",
+    "預估單價",
+    "預估小計",
+  ]);
   await expect(applicant.getByText("草稿", { exact: true })).toBeVisible();
   await expect(
     applicant.getByText("TWD 0.87", { exact: true }).first(),
@@ -1054,7 +1344,12 @@ test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照
   await expect(
     applicant.getByText(actorName("finance"), { exact: true }),
   ).toBeVisible();
-  await expect(applicant.getByText("第 1 輪", { exact: true })).toBeVisible();
+  await expect(
+    applicant
+      .locator("dl")
+      .filter({ hasText: "送審輪次" })
+      .getByText("第 1 輪", { exact: true }),
+  ).toBeVisible();
   await history(applicant, [applicantEvent]);
   await checkLayout(page, applicant, itemName, "approval-detail");
 
@@ -1106,8 +1401,11 @@ test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照
     await expectRoundName(applicant);
     await history(applicant, [applicantEvent, managerEvent, financeEvent]);
 
-    // 第二案由主管真實駁回，申請人仍讀得到歷程，已送審單不再是可編輯草稿。
-    await seedPending(page.request, rejectedSubject);
+    // 第二案使用合法的單價與整單金額上限，仍由主管真實駁回。
+    await seedPending(page.request, rejectedSubject, {
+      quantity: 10,
+      unitPrice: 1_000_000,
+    });
     await manager.getByRole("button", { name: "返回請購列表" }).click();
     await openApproval(manager, rejectedSubject);
     await manager.getByRole("button", { name: "駁回", exact: true }).click();
@@ -1115,8 +1413,23 @@ test("申請人、主管、財務依序完成簽核，保留 U+FEFF 部門快照
     await expect(
       manager.getByRole("button", { name: "核准", exact: true }),
     ).toHaveCount(0);
+    // 用同一位申請人核對上限金額排版，列表箭頭與明細兩個金額欄都須留在自己的欄內。
     await applicant.getByRole("button", { name: "返回請購列表" }).click();
+    const maxTotal = "TWD 10,000,000.00";
+    const maxUnitPrice = "TWD 1,000,000.00";
+    await checkMoneyFits(page, [
+      [rowFor(applicant, rejectedSubject).getByRole("cell").last(), maxTotal],
+    ]);
     await openApproval(applicant, rejectedSubject);
+    const lineCells = applicant
+      .getByRole("region", { name: "請購品項" })
+      .getByRole("cell");
+    await checkMoneyFits(page, [
+      [lineCells.filter({ hasText: maxUnitPrice }), maxUnitPrice],
+      [lineCells.filter({ hasText: maxTotal }), maxTotal],
+    ]);
+
+    // 申請人仍讀得到駁回歷程，且先前已送審的請購不可回到草稿編輯。
     await expect(
       applicant.getByText("駁回結案", { exact: true }),
     ).toBeVisible();
@@ -1552,6 +1865,10 @@ test("回應中斷後保留原筆未知結果，同帳號恢復身分後可讀�
     await region
       .getByRole("button", { name: "重新讀取結果", exact: true })
       .click();
+    // 等原筆明細讀回並出現在獨立畫面，再核對該單的狀態。
+    await expect(
+      region.getByRole("heading", { name: subject, exact: true }),
+    ).toBeVisible();
     await expect(region.getByText("財務待審", { exact: true })).toBeVisible();
     await expect(unknown).toHaveCount(0);
     await expect(
@@ -1682,7 +1999,7 @@ for (const resubmit of [false, true]) {
       } else {
         // 只移除查無的案件，重新載入清單後仍可核對另一筆未知結果。
         await expect(
-          region.getByRole("heading", { name: /^請購明細 / }),
+          region.getByRole("button", { name: "返回請購列表", exact: true }),
         ).toHaveCount(0);
         await expect(
           region.getByText("目前無法讀取這筆請購，無法確認先前操作結果。", {
@@ -1696,6 +2013,10 @@ for (const resubmit of [false, true]) {
         await expect(rowFor(region, otherSubject)).toHaveCount(1);
         await expect(rowFor(region, subject)).toHaveCount(0);
         await readback.click();
+        // 等保留的另一筆明細出現，再核對該單結案狀態。
+        await expect(
+          region.getByRole("heading", { name: otherSubject, exact: true }),
+        ).toBeVisible();
         await expect(
           region.getByText("駁回結案", { exact: true }),
         ).toBeVisible();
@@ -1793,7 +2114,7 @@ test("已確認寫入與讀回失敗分開，同帳號可恢復，跨分頁換�
       await expect(confirmed).toContainText("已駁回。");
       await expect(readback).toBeEnabled();
       await expect(
-        region.getByRole("heading", { name: /^請購明細 / }),
+        region.getByRole("button", { name: "返回請購列表", exact: true }),
       ).toHaveCount(0);
       expect(writes).toBe(1);
     }
@@ -1812,6 +2133,10 @@ test("已確認寫入與讀回失敗分開，同帳號可恢復，跨分頁換�
     const latest: RequisitionDetailDto = await read.json();
     expect(latest.id).toBe(first.id);
     expect(latest.version).not.toBe(first.version);
+    // GET 成功後仍須等畫面採用該筆明細，列表也可能已有同一個狀態。
+    await expect(
+      region.getByRole("heading", { name: firstSubject, exact: true }),
+    ).toBeVisible();
     await expect(region.getByText("駁回結案", { exact: true })).toBeVisible();
     await expect(region.getByRole("status")).toHaveText(
       "已駁回，並讀取最新狀態。",
@@ -2566,7 +2891,12 @@ test("撤掉指派主管角色後舊畫面停止簽核，申請人可見暫停�
     const reload = manager.getByRole("button", { name: "重新讀取請購列表" });
     await reload.click();
     await expect(reload).toBeEnabled();
-    await expect(rowFor(manager, pendingSubject)).toHaveCount(0);
+    // 原主管沒有本人請購，撤權後真實授權清單應顯示原本的空資料提示。
+    await expect(manager.getByText("目前沒有可查閱的請購。")).toBeVisible();
+    await expect(manager.getByRole("region", { name: "請購列表" })).toHaveCount(
+      0,
+    );
+    await expect(manager.getByText("沒有符合搜尋條件的請購。")).toHaveCount(0);
 
     // 申請人仍有權查閱，重讀只顯示暫停與原關卡、原輪次和原歷程。
     await applicant.getByRole("button", { name: "返回請購列表" }).click();

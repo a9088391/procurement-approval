@@ -12,6 +12,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // 建立 Identity 使用者、角色、關聯資料及 Sessions，先建主表再建立相依外鍵。
             migrationBuilder.CreateTable(
                 name: "AspNetRoles",
                 columns: table => new
@@ -226,6 +227,7 @@ namespace Procurement.Api.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // 移除此 migration 建立的 Identity 與 Sessions 資料表，資料內容也會一併刪除。
             migrationBuilder.DropTable(
                 name: "AspNetRoleClaims");
 

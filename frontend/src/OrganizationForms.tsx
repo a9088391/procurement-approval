@@ -11,17 +11,21 @@ export type SubmitOrganization = (
   event: FormEvent<HTMLFormElement>,
   buildWrite: (values: FormData) => OrganizationWrite,
   confirmation: string,
+  onConfirmed?: () => void,
 ) => Promise<void>;
 
 interface FormProps {
-  snapshot: OrganizationDto;
-  revision: number;
   disabled: boolean;
+  pending: boolean;
+  onCancel: () => void;
   onSubmit: SubmitOrganization;
 }
 
-interface NamedFormProps extends FormProps {
-  departmentName: (department: DepartmentDto) => string;
+type DepartmentName = (department: DepartmentDto) => string;
+
+interface AccountFormProps extends FormProps {
+  snapshot: OrganizationDto;
+  departmentName: DepartmentName;
 }
 
 // 欄位值以表單原樣送出，名稱的修剪和長度由 API 統一判斷。
@@ -29,140 +33,130 @@ function field(values: FormData, name: string) {
   return String(values.get(name) ?? "");
 }
 
-// 部門與帳號表單使用同一份讀回資料及標籤，避免個別下拉欄位辨識方式不同。
-export function OrganizationForms(props: FormProps) {
-  // 先找出同名部門，讓長清單的每個選項不必再次掃描全部部門。
-  const names = new Set<string>();
-  const duplicates = new Set<string>();
-  for (const department of props.snapshot.departments) {
-    if (names.has(department.name)) duplicates.add(department.name);
-    names.add(department.name);
-  }
-
-  // 停用部門顯示狀態；名稱重複才加穩定識別碼，以便選對記錄。
-  function departmentName(department: DepartmentDto) {
-    return `${department.name}${department.active ? "" : "（已停用）"}${duplicates.has(department.name) ? ` · ${department.id}` : ""}`;
-  }
-
-  // 兩區保留各自選取，讀回後才用新快照替換可編輯表單。
+// 保存與取消共用一列；處理期間停用取消，閘門空閒但需讀回時仍可離開。
+function OrganizationFormActions({
+  label,
+  disabled,
+  pending,
+  onCancel,
+}: {
+  label: string;
+  disabled: boolean;
+  pending: boolean;
+  onCancel: () => void;
+}) {
   return (
-    <>
-      <DepartmentManagement {...props} departmentName={departmentName} />
-      <AccountManagement {...props} departmentName={departmentName} />
-    </>
+    <div className="organization-form-actions">
+      <button type="submit" disabled={disabled}>
+        {label}
+      </button>
+      <button
+        type="button"
+        className="secondary"
+        disabled={pending}
+        onClick={onCancel}
+      >
+        取消
+      </button>
+    </div>
   );
 }
 
-// 部門管理以讀回資料呈現目前名稱與狀態，新增和更新各送自己的欄位。
-function DepartmentManagement({
-  snapshot,
-  revision,
+// 新增部門以獨立表單接收名稱，避免與既有部門的狀態及版本混用。
+export function CreateDepartment({
   disabled,
+  pending,
+  onCancel,
   onSubmit,
-  departmentName,
-}: NamedFormProps) {
-  // 由已選識別對應目前快照，若重讀後目標已消失就不再顯示舊表單。
-  const [selectedId, setSelectedId] = useState("");
-  const { departments } = snapshot;
-  const department = departments.find(
-    // 使用穩定識別對應部門，容許不同部門使用相同名稱。
-    (item) => item.id === selectedId,
-  );
-
-  // 讀回成功才以新資料重建選定部門的草稿，驗證拒絕時仍保留原輸入。
+}: FormProps) {
   return (
-    <section aria-labelledby="department-title">
-      <h3 id="department-title">部門管理</h3>
-      <form
-        key={revision}
-        aria-label="新增部門"
-        onSubmit={
-          // 新增部門只送名稱，識別及啟用狀態由後端建立。
-          (event) =>
-            void onSubmit(
-              event,
-              // 欄位保留原字元，交由 API 修剪和驗證。
-              (values) => ({
-                path: "departments",
-                body: { name: field(values, "name") },
-              }),
-              "已新增部門",
-            )
-        }
-      >
-        <fieldset disabled={disabled}>
-          <label htmlFor="new-department-name">新部門名稱</label>
-          <input id="new-department-name" name="name" required />
-          <p className="hint">去除首尾空白後須為 1–100 個字元。</p>
-          <button type="submit">新增部門</button>
-        </fieldset>
-      </form>
-
-      <label htmlFor="select-department">選擇部門</label>
-      <select
-        id="select-department"
+    <form
+      aria-label="新增部門"
+      onSubmit={
+        // 新增部門只送名稱，識別及啟用狀態由後端建立。
+        (event) =>
+          void onSubmit(
+            event,
+            // 欄位保留原字元，交由 API 修剪和驗證。
+            (values) => ({
+              path: "departments",
+              body: { name: field(values, "name") },
+            }),
+            "已新增部門",
+          )
+      }
+    >
+      <fieldset disabled={disabled}>
+        <label htmlFor="new-department-name">新部門名稱</label>
+        <input id="new-department-name" name="name" required />
+        <p className="hint">去除首尾空白後須為 1–100 個字元。</p>
+      </fieldset>
+      <OrganizationFormActions
+        label="儲存部門設定"
         disabled={disabled}
-        value={department?.id ?? ""}
-        onChange={
-          // 只切換畫面選取，未保存的內容不會送往後端。
-          (event) => setSelectedId(event.currentTarget.value)
-        }
-      >
-        <option value="">請選擇要編輯的部門</option>
-        {departments.map(
-          // 停用部門仍可選取以查閱或重新啟用。
-          (item) => (
-            <option key={item.id} value={item.id}>
-              {departmentName(item)}
-            </option>
-          ),
-        )}
-      </select>
-      {department ? (
-        <form
-          key={`${department.id}:${revision}`}
-          aria-label="編輯部門"
-          onSubmit={
-            // 更新一律提交目前草稿所依據的版本，避免覆蓋其他工作階段。
-            (event) =>
-              void onSubmit(
-                event,
-                // 傳回明確的啟用狀態，並以穩定識別指向原部門。
-                (values) => ({
-                  path: `departments/${encodeURIComponent(department.id)}`,
-                  body: {
-                    name: field(values, "name"),
-                    active: field(values, "active") === "true",
-                    version: department.version,
-                  },
-                }),
-                "已儲存部門設定",
-              )
-          }
+        pending={pending}
+        onCancel={onCancel}
+      />
+    </form>
+  );
+}
+
+// 編輯部門只使用被選取的識別與版本，即使多個部門同名也能正確保存。
+export function EditDepartment({
+  department,
+  departmentName,
+  disabled,
+  pending,
+  onCancel,
+  onSubmit,
+}: FormProps & { department: DepartmentDto; departmentName: DepartmentName }) {
+  return (
+    <form
+      aria-label="編輯部門"
+      onSubmit={
+        // 更新一律提交目前草稿所依據的版本，避免覆蓋其他工作階段。
+        (event) =>
+          void onSubmit(
+            event,
+            // 傳回明確的啟用狀態，並以穩定識別指向原部門。
+            (values) => ({
+              path: `departments/${encodeURIComponent(department.id)}`,
+              body: {
+                name: field(values, "name"),
+                active: field(values, "active") === "true",
+                version: department.version,
+              },
+            }),
+            "已儲存部門設定",
+          )
+      }
+    >
+      <fieldset disabled={disabled}>
+        <p>目前部門：{departmentName(department)}</p>
+        <label htmlFor="department-name">部門名稱</label>
+        <input
+          id="department-name"
+          name="name"
+          defaultValue={department.name}
+          required
+        />
+        <label htmlFor="department-active">部門狀態</label>
+        <select
+          id="department-active"
+          name="active"
+          defaultValue={String(department.active)}
         >
-          <fieldset disabled={disabled}>
-            <p>目前部門：{departmentName(department)}</p>
-            <label htmlFor="department-name">部門名稱</label>
-            <input
-              id="department-name"
-              name="name"
-              defaultValue={department.name}
-              required
-            />
-            <label htmlFor="department-active">部門狀態</label>
-            <select
-              id="department-active"
-              name="active"
-              defaultValue={String(department.active)}
-            >
-              <option value="true">啟用</option>
-              <option value="false">停用</option>
-            </select>
-            <button type="submit">儲存部門設定</button>
-          </fieldset>
-        </form>
-      ) : null}
-    </section>
+          <option value="true">啟用</option>
+          <option value="false">停用</option>
+        </select>
+      </fieldset>
+      <OrganizationFormActions
+        label="儲存部門設定"
+        disabled={disabled}
+        pending={pending}
+        onCancel={onCancel}
+      />
+    </form>
   );
 }
 
@@ -174,7 +168,7 @@ function DepartmentSelect({
   account,
 }: {
   departments: DepartmentDto[];
-  departmentName: NamedFormProps["departmentName"];
+  departmentName: DepartmentName;
   id: string;
   account?: BusinessAccountDto;
 }) {
@@ -300,16 +294,19 @@ function ReviewerSelect({
 }
 
 // 帳號表單以文字呈現最後一次讀回的設定，保存時帶回同一份資料的版本。
-function AccountSettings({
+export function EditAccount({
   account,
   snapshot,
   disabled,
+  pending,
+  onCancel,
   onSubmit,
   departmentName,
-}: Omit<NamedFormProps, "revision"> & { account: BusinessAccountDto }) {
+}: AccountFormProps & { account: BusinessAccountDto }) {
   // 只保存需彼此限制的選取值；每次讀回後以最新資料重建草稿。
   const [manager, setManager] = useState(account.managerReviewerId ?? "");
   const [finance, setFinance] = useState(account.financeReviewerId ?? "");
+  const [resetOpen, setResetOpen] = useState(false);
 
   // 快照摘要用名稱顯示部門及審核人，讓長名稱即使在下拉欄位截斷仍能閱讀。
   const department = snapshot.departments.find(
@@ -404,164 +401,135 @@ function AccountSettings({
             otherValue={manager}
             onChange={setFinance}
           />
-          <button type="submit">儲存業務帳號設定</button>
         </fieldset>
+        <OrganizationFormActions
+          label="儲存業務帳號設定"
+          disabled={disabled}
+          pending={pending}
+          onCancel={onCancel}
+        />
       </form>
 
-      <form
-        aria-label="重設業務帳號密碼"
-        onSubmit={
-          // 重設只提交臨時密碼和帳號版本，後端保存時撤銷原有登入。
-          (event) =>
-            void onSubmit(
-              event,
-              // 密碼依使用者輸入原樣送出，包含首尾空白。
-              (values) => ({
-                path: `accounts/${encodeURIComponent(account.id)}/reset-password`,
-                body: {
-                  version: account.version,
-                  newPassword: field(values, "newPassword"),
-                },
-              }),
-              "已重設業務帳號密碼",
-            )
+      <details
+        className="organization-password-reset"
+        onToggle={
+          // 只在展開時掛載重設表單，收合便捨棄未送出的密碼。
+          (event) => setResetOpen(event.currentTarget.open)
         }
       >
-        <fieldset disabled={disabled}>
-          <label htmlFor="reset-account-password">新的臨時密碼</label>
-          <input
-            id="reset-account-password"
-            name="newPassword"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={12}
-            maxLength={128}
-            aria-describedby="reset-account-password-hint"
-          />
-          <p className="hint" id="reset-account-password-hint">
-            12–128 個字元，須與原密碼不同。重設會撤銷此帳號的所有登入。
-          </p>
-          <button type="submit">重設業務帳號密碼</button>
-        </fieldset>
-      </form>
+        <summary>重設密碼</summary>
+        {resetOpen ? (
+          <form
+            aria-label="重設業務帳號密碼"
+            onSubmit={
+              // 重設只提交臨時密碼和帳號版本，後端保存時撤銷原有登入。
+              (event) =>
+                void onSubmit(
+                  event,
+                  // 密碼依使用者輸入原樣送出，包含首尾空白。
+                  (values) => ({
+                    path: `accounts/${encodeURIComponent(account.id)}/reset-password`,
+                    body: {
+                      version: account.version,
+                      newPassword: field(values, "newPassword"),
+                    },
+                  }),
+                  "已重設業務帳號密碼",
+                )
+            }
+          >
+            <fieldset disabled={disabled}>
+              <label htmlFor="reset-account-password">新的臨時密碼</label>
+              <input
+                id="reset-account-password"
+                name="newPassword"
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                maxLength={128}
+                aria-describedby="reset-account-password-hint"
+              />
+              <p className="hint" id="reset-account-password-hint">
+                12–128 個字元，須與原密碼不同。重設會撤銷此帳號的所有登入。
+              </p>
+              <button type="submit">重設業務帳號密碼</button>
+            </fieldset>
+          </form>
+        ) : null}
+      </details>
     </>
   );
 }
 
-// 只列出快照中的業務帳號；新建表單不接受類別或管理角色。
-function AccountManagement({
+// 新建業務帳號與編輯分開，讓新增只使用核准的新帳號欄位。
+export function CreateAccount({
   snapshot,
-  revision,
   disabled,
+  pending,
+  onCancel,
   onSubmit,
   departmentName,
-}: NamedFormProps) {
-  // 編輯目標與新建表單分離；以目前快照判定可管理的已選帳號。
-  const [selectedId, setSelectedId] = useState("");
-  const account = snapshot.accounts.find(
-    // 以穩定識別尋找目標，避免重讀後仍引用舊的帳號資料。
-    (item) => item.id === selectedId,
-  );
-  const hasActiveDepartment = snapshot.departments.some(
-    // 有可分配部門時才開放新增帳號。
-    (item) => item.active,
-  );
-
-  // 新建、編輯及重設個別顯示，讓管理員能清楚區別保存的對象及內容。
+}: AccountFormProps) {
   return (
-    <section aria-labelledby="account-title">
-      <h3 id="account-title">業務帳號管理</h3>
-      {!hasActiveDepartment ? (
-        <p className="hint">請先新增或啟用至少一個部門，再建立業務帳號。</p>
-      ) : null}
-      <form
-        key={revision}
-        aria-label="新增業務帳號"
-        onSubmit={
-          // 新業務帳號只收臨時密碼、啟用部門及兩個可設定角色。
-          (event) =>
-            void onSubmit(
-              event,
-              // 明確傳回兩個布林值，密碼不做修剪或預填。
-              (values) => ({
-                path: "accounts",
-                body: {
-                  userName: field(values, "userName"),
-                  password: field(values, "password"),
-                  departmentId: field(values, "departmentId"),
-                  isManager: field(values, "isManager") === "true",
-                  isFinance: field(values, "isFinance") === "true",
-                },
-              }),
-              "已新增業務帳號",
-            )
-        }
-      >
-        <fieldset disabled={disabled || !hasActiveDepartment}>
-          <label htmlFor="new-account-name">新業務帳號名稱</label>
-          <input
-            id="new-account-name"
-            name="userName"
-            autoComplete="off"
-            required
-          />
-          <p className="hint">去除首尾空白後須為 1–64 個字元。</p>
-          <label htmlFor="new-account-password">臨時密碼</label>
-          <input
-            id="new-account-password"
-            name="password"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={12}
-            maxLength={128}
-            aria-describedby="new-account-password-hint"
-          />
-          <p className="hint" id="new-account-password-hint">
-            12–128 個字元，保留首尾空白。此帳號登入後須先變更密碼。
-          </p>
-          <DepartmentSelect
-            id="new-account-department"
-            departments={snapshot.departments}
-            departmentName={departmentName}
-          />
-          <RoleSelects id="new-account" />
-          <button type="submit">新增業務帳號</button>
-        </fieldset>
-      </form>
-
-      <label htmlFor="select-account">選擇業務帳號</label>
-      <select
-        id="select-account"
-        disabled={disabled}
-        value={account?.id ?? ""}
-        onChange={
-          // 切換目標時捨棄原帳號的表單，不保存未提交的輸入。
-          (event) => setSelectedId(event.currentTarget.value)
-        }
-      >
-        <option value="">請選擇要編輯的業務帳號</option>
-        {snapshot.accounts.map(
-          // 停用帳號仍可查閱及重新啟用，以穩定識別保存原有關聯。
-          (item) => (
-            <option key={item.id} value={item.id}>
-              {item.userName}
-              {item.active ? "" : "（已停用）"}
-            </option>
-          ),
-        )}
-      </select>
-      {account ? (
-        <AccountSettings
-          key={`${account.id}:${revision}`}
-          account={account}
-          snapshot={snapshot}
-          disabled={disabled}
-          onSubmit={onSubmit}
+    <form
+      aria-label="新增業務帳號"
+      onSubmit={
+        // 新業務帳號只收臨時密碼、啟用部門及兩個可設定角色。
+        (event) =>
+          void onSubmit(
+            event,
+            // 明確傳回兩個布林值，密碼不做修剪或預填。
+            (values) => ({
+              path: "accounts",
+              body: {
+                userName: field(values, "userName"),
+                password: field(values, "password"),
+                departmentId: field(values, "departmentId"),
+                isManager: field(values, "isManager") === "true",
+                isFinance: field(values, "isFinance") === "true",
+              },
+            }),
+            "已新增業務帳號",
+          )
+      }
+    >
+      <fieldset disabled={disabled}>
+        <label htmlFor="new-account-name">新業務帳號名稱</label>
+        <input
+          id="new-account-name"
+          name="userName"
+          autoComplete="off"
+          required
+        />
+        <p className="hint">去除首尾空白後須為 1–64 個字元。</p>
+        <label htmlFor="new-account-password">臨時密碼</label>
+        <input
+          id="new-account-password"
+          name="password"
+          type="password"
+          autoComplete="new-password"
+          required
+          minLength={12}
+          maxLength={128}
+          aria-describedby="new-account-password-hint"
+        />
+        <p className="hint" id="new-account-password-hint">
+          12–128 個字元，保留首尾空白。此帳號登入後須先變更密碼。
+        </p>
+        <DepartmentSelect
+          id="new-account-department"
+          departments={snapshot.departments}
           departmentName={departmentName}
         />
-      ) : null}
-    </section>
+        <RoleSelects id="new-account" />
+      </fieldset>
+      <OrganizationFormActions
+        label="儲存業務帳號設定"
+        disabled={disabled}
+        pending={pending}
+        onCancel={onCancel}
+      />
+    </form>
   );
 }

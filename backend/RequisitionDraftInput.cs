@@ -114,9 +114,11 @@ internal sealed record RequisitionDraftInput(
         // 小數尾端即使全是零也要計入位數，避免解析時靜默縮減精度。
         var text = raw.GetRawText();
         var point = text.IndexOf('.');
-        if ((point >= 0 && text.Length - point - 1 > 2)
+        if ((point >= 0
+                && text.Length - point - 1 > 2)
             || !decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value)
-            || value is <= 0m or > MaxUnitPrice)
+            || value is <= 0m
+                or > MaxUnitPrice)
             return false;
 
         price = value;
