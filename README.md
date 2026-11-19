@@ -25,9 +25,11 @@
 
 簽核寫入在取得 PostgreSQL 交易鎖後重新檢查版本、角色與指派，並在同一筆交易保存狀態、版本及操作歷程。測試讓兩個真實 HTTP 請求等待同一把鎖，再核對只有一個決定生效。另一案例在提交時注入故障，核對原關卡、版本、快照與歷程都保留。[簽核決定](backend/RequisitionApprovalService.cs#L208) · [交易鎖與角色檢查](backend/RequisitionApprovalService.cs#L347) · [重疊請求測試](tests/RequisitionApprovalTransactionTests.cs#L20) · [提交失敗回滾測試](tests/RequisitionApprovalTransactionTests.cs#L201) · [交易設計](docs/backend.md#安全及一致性) · [整合測試覆蓋](docs/testing.md#覆蓋方式)
 
-## 本機啟動
+## 本機啟動、停止與重設
 
 已驗證 macOS ARM64。需要 Docker 與 Docker Compose，以及可用的 `127.0.0.1:5080`。在專案根目錄執行下列命令。
+
+### 啟動
 
 ```sh
 docker compose -p procurement-approval up --build -d
@@ -36,6 +38,28 @@ docker compose -p procurement-approval up --build -d
 瀏覽器開啟 `http://127.0.0.1:5080`。首次初始化後，用本機編輯器查看 `.local/initial-accounts.json` 的隨機初始密碼。示範帳號為 `admin`（管理員）、`applicant`（申請人）、`manager`（主管）及 `finance`（財務）。若曾復原管理員或重設展示，請查看對應命令顯示的憑證檔。初始密碼檔保留生成時的密碼。
 
 網站以本機 HTTP 提供展示，資料庫留在 Compose 內部網路。資料 volume 與 `.local/keys/` 一起保留，才能在重啟後維持已保存資料與仍有效的登入。[啟動診斷、停止與重啟、管理員復原、展示重設](docs/local-demo.md)
+
+### 停止與再啟動
+
+```sh
+docker compose -p procurement-approval stop
+```
+
+停止會保留資料庫與 `.local/`。需要繼續展示時，執行：
+
+```sh
+docker compose -p procurement-approval up -d
+```
+
+### 重設展示資料
+
+先啟動目前版本並保持 `db` 執行，再執行：
+
+```sh
+sh reset-demo.sh procurement-approval
+```
+
+核對預覽後，輸入 `reset procurement-approval/db/procurement` 確認。重設會清除帳號與登入、組織設定、請購、所有輪次快照及歷程；沒有備份就無法復原。完成後，使用命令顯示的 `.local/reset-accounts-<識別碼>.json` 中的新密碼登入，並重新建立部門與指派審核人。直接按 Enter 可取消。
 
 ## 手動驗證
 
